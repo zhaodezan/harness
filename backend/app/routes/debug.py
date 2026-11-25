@@ -19,7 +19,7 @@ from backend.app.runtime.a2a import DelegationBudget
 from backend.app.runtime.sandbox_tools import sandbox_code_tool
 from backend.app.runtime.cube_sandbox import SandboxUnavailable
 from backend.app.runtime.windows_tool import WindowsToolError
-from backend.app.tools import ApprovalRequired, filter_tools_for_agent, model_tool_names
+from backend.app.tools import ApprovalRequired, chat_tool_requires_approval, filter_tools_for_agent, model_tool_names
 
 router = APIRouter(prefix="/api/agents", tags=["agent debug"])
 
@@ -100,10 +100,12 @@ async def debug_agent(agent_id: str, payload: DebugRequest, request: Request):
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from None
     messages.extend(item.model_dump() for item in payload.messages)
+    registry = request.app.state.tool_registry
     registered_tools = filter_tools_for_agent(
-        request.app.state.tool_registry.list(), config.selected_mcp_tools, config.selected_local_tools,
+        registry.list(), config.selected_mcp_tools, config.selected_local_tools,
         config.selected_database_connections,
     )
+    registry_snapshot = {tool["name"]: registry.get_definition(tool["name"]) for tool in registered_tools}
     skill_tool = skill_resource_tool(registered_tools) if skill_context.loaded else None
     if skill_tool:
         registered_tools.append(skill_tool)
@@ -217,7 +219,7 @@ async def debug_agent(agent_id: str, payload: DebugRequest, request: Request):
                                     agent_id, definition["plugin_id"],
                                     draft_connection_ids=config.selected_database_connections,
                                 )
-                            approved = definition["risk"] == "read_only"
+                            approved = not chat_tool_requires_approval(definition)
                             if database_authorized and not approved:
                                 approval_id = uuid.uuid4().hex
                                 future = asyncio.get_running_loop().create_future()
@@ -284,8 +286,11 @@ async def debug_agent(agent_id: str, payload: DebugRequest, request: Request):
                                         call["arguments"].get("code", ""), call["arguments"].get("arguments", {}),
                                     )}
                                 else:
-                                    result = {"result": await request.app.state.tool_registry.execute(
-                                        call["name"], call["arguments"], approved=approved
+                                    expected = registry_snapshot.get(call["name"])
+                                    if expected is None:
+                                        raise PermissionError("工具已不可用")
+                                    result = {"result": await registry.execute(
+                                        call["name"], call["arguments"], approved=approved, expected=expected,
                                     )}
                             except ApprovalRequired:
                                 result = {"error": "用户未批准此操作；不要再次执行该操作"}

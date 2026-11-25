@@ -258,7 +258,7 @@ export function PluginLibraryPage({ agents, onConfigure, onCreate, onDelete }: P
     {activeTab === 'Agent' && <AgentListPage agents={agents} onConfigure={onConfigure} onCreate={onCreate} onDelete={onDelete}/>}
     {activeTab === 'Skill' && <div className="plugin-list"><div className="plugin-list-head"><h2>已加载 Skills</h2><label className="plugin-file-button">从 ZIP 加载<input type="file" accept=".zip,application/zip" onChange={importSkill}/></label></div><p className="plugin-helper">ZIP 中每个 Skill 需有包含 name 与 description 的 SKILL.md。安装在本机应用数据目录。</p>{skills.map((skill) => <article className="plugin-card" key={skill.name}><div><strong>{skill.name}</strong><small>{skill.description}</small></div><button className="danger-button" onClick={() => deleteSkill(skill.name)}>卸载</button></article>)}{!skills.length && <p className="plugin-empty">尚未加载 Skill ZIP。</p>}</div>}
     {activeTab === 'MCP' && <div className="plugin-list">
-      <div className="plugin-list-head"><h2>MCP 配置</h2><span className="plugin-helper">连接前请确认服务命令或地址可信。</span></div>
+      <div className="plugin-list-head"><h2>MCP 配置</h2><span className="plugin-helper">连接前请确认服务命令或地址可信。已选中的 MCP 工具直接调用，不逐次审批。</span></div>
       <form className="plugin-form" onSubmit={createMcp}>
         <label>名称<input value={mcpName} onChange={(e) => setMcpName(e.target.value)} required /></label>
         <label>连接方式<select value={mcpTransport} onChange={(e) => setMcpTransport(e.target.value as MCPTransport)}><option value="stdio">Local（本机程序 / stdio）</option><option value="sse">SSE</option><option value="streamable_http">Streamable HTTP</option></select></label>
@@ -275,7 +275,7 @@ export function PluginLibraryPage({ agents, onConfigure, onCreate, onDelete }: P
       </form>
       {servers.map((server) => <article className="plugin-server-card" key={server.id}>
         <div className="plugin-card"><div><strong>{server.name}</strong><small>{server.transport === 'stdio' ? `${server.command} ${server.args.join(' ')}` : server.url} · {server.connected ? '已连接' : '未连接'}</small></div><button onClick={() => toggleMcp(server)}>{server.connected ? '断开' : '连接'}</button><button className="danger-button" onClick={() => deleteServer(server.id)}>删除</button></div>
-        {(mcpTools[server.id] ?? []).map((tool) => <div className="mcp-tool" key={tool.name}><span>{tool.name}</span><small>{tool.risk === 'read_only' ? '只读' : '运行前需批准'} · {tool.description}</small></div>)}
+        {(mcpTools[server.id] ?? []).map((tool) => <div className="mcp-tool" key={tool.name}><span>{tool.name}</span><small>{tool.risk === 'read_only' ? '只读 · 直接调用' : '可能修改数据 · 直接调用'} · {tool.description}</small></div>)}
       </article>)}
       {!servers.length && <p className="plugin-empty">尚未配置 MCP Server。</p>}
     </div>}

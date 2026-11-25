@@ -44,6 +44,11 @@ class ToolDefinition:
     plugin_id: str | None = None
 
 
+def chat_tool_requires_approval(tool: dict[str, Any]) -> bool:
+    """Apply per-call approval after chat tool selection; keep risk metadata intact."""
+    return tool["risk"] == "side_effect" and not (tool.get("plugin_id") or "").startswith("mcp:")
+
+
 def filter_tools_for_agent(
     tools: list[dict[str, Any]], selected_mcp_tools: list[str], selected_local_tools: list[str],
     selected_database_connections: list[str] | None = None,

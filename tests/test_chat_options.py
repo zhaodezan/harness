@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.db import database_connection
 from backend.app.main import create_app
-from backend.app.tools import ToolDefinition
+from backend.app.tools import ToolDefinition, model_tool_names
 from model_test_utils import create_test_agent, create_test_model
 
 
@@ -173,25 +173,34 @@ def test_temporary_agent_delegation_is_not_inherited_by_child(tmp_path):
     assert 'child answer' in requests[2]['messages'][-1]['content']
 
 
-@pytest.mark.parametrize('replace_before_approval', [False, True])
-def test_selected_mcp_write_cannot_run_without_approval_or_after_replacement(tmp_path, replace_before_approval):
+@pytest.mark.parametrize('scope', ['workspace', 'published', 'debug'])
+@pytest.mark.parametrize('scenario', ['selected', 'replaced', 'unselected'])
+def test_mcp_skips_approval_without_bypassing_tool_selection(tmp_path, scope, scenario):
     requests, executions = [], []
     server_id = uuid4().hex
     tool_id = f'mcp:{server_id}:write'
+    tool_name = 'Sample/write'
+    alias = model_tool_names([tool_name])[tool_name]
+    selected = [] if scenario == 'unselected' else [tool_id]
+
+    def tool():
+        return ToolDefinition(tool_name, 'Write sample record', {'type': 'object'},
+                              'side_effect', lambda _: executions.append('write'), tool_id)
 
     async def provider(request):
         body = json.loads(await request.aread())
         requests.append(body)
         if len(requests) == 1:
-            return invoke(body['tools'][0]['function']['name'], {})
+            assert (alias in [item['function']['name'] for item in body.get('tools', [])]) == bool(selected)
+            if scenario == 'replaced':
+                app.state.tool_registry.unregister(tool_name)
+                app.state.tool_registry.register(tool())
+            return invoke(alias, {})
         return sse({'content': 'done'})
 
-    def tool():
-        return ToolDefinition('Sample/write', 'Write sample record', {'type': 'object'},
-                              'side_effect', lambda _: executions.append('write'), tool_id)
+    app = create_app(tmp_path / 'db.sqlite', data_dir=tmp_path / 'data', secret_store=Secrets(), http_transport=httpx.MockTransport(provider))
 
     async def run():
-        app = create_app(tmp_path / 'db.sqlite', data_dir=tmp_path / 'data', secret_store=Secrets(), http_transport=httpx.MockTransport(provider))
         async with app.router.lifespan_context(app):
             with database_connection(app.state.database_path) as db:
                 db.execute("INSERT INTO mcp_servers(id,name,transport) VALUES(?,?,'sse')", (server_id, 'Sample'))
@@ -204,31 +213,33 @@ def test_selected_mcp_write_cannot_run_without_approval_or_after_replacement(tmp
                            'selected_mcp_tools': [f'mcp:{server_id}:*']})).json()
                 catalog = (await client.get(f"/api/agents/{agent['id']}/chat-options")).json()
                 assert catalog['defaults']['mcp_tools'] == [tool_id]
-                session = (await client.post('/api/sessions', json={'agent_id': agent['id']})).json()
-                url = f"/api/sessions/{session['id']}/messages"
-                payload = {'content': 'Try sample write', 'capabilities': {'mcp_tools': [tool_id]}}
+                if scope == 'debug':
+                    url = f"/api/agents/{agent['id']}/debug"
+                    payload = {'config': {'model_config_id': model, 'selected_mcp_tools': selected},
+                               'messages': [{'role': 'user', 'content': 'Try sample write'}]}
+                else:
+                    session = (await client.post('/api/sessions', json={'agent_id': agent['id']} if scope == 'published' else {})).json()
+                    url = f"/api/sessions/{session['id']}/messages"
+                    payload = {'content': 'Try sample write', 'model_config_id': model, 'capabilities': {'mcp_tools': selected}}
                 task = asyncio.create_task(client.post(url, json=payload))
                 try:
-                    async with asyncio.timeout(3):
-                        while not app.state.pending_approvals:
-                            assert not task.done()
+                    async with asyncio.timeout(5):
+                        while not task.done():
+                            assert not app.state.pending_approvals, 'MCP call must not wait for approval'
                             await asyncio.sleep(0.01)
-                    approval_id = next(iter(app.state.pending_approvals))
-                    assert executions == []
-                    if replace_before_approval:
-                        app.state.tool_registry.unregister('Sample/write')
-                        app.state.tool_registry.register(tool())
-                    decision = await client.post(f'/api/approvals/{approval_id}', json={'approved': replace_before_approval})
-                    assert decision.status_code == 200
-                    assert 'event: done' in (await task).text
-                    app.state.mcp_manager.servers.pop(server_id)
-                    assert (await client.post(url, json=payload)).status_code == 422
+                        response = await task
+                    assert response.status_code == 200
+                    assert 'event: done' in response.text and 'approval_required' not in response.text
+                    if selected and scope != 'debug':
+                        app.state.mcp_manager.servers.pop(server_id)
+                        assert (await client.post(url, json=payload)).status_code == 422
                 finally:
                     if not task.done():
                         task.cancel()
                         await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(run())
-    assert executions == []
+    assert executions == (['write'] if scenario == 'selected' else [])
     assert len(requests) == 2
-    assert 'error' in json.loads(requests[1]['messages'][-1]['content'])
+    result = json.loads(requests[1]['messages'][-1]['content'])
+    assert ('result' if scenario == 'selected' else 'error') in result

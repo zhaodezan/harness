@@ -23,8 +23,7 @@ from backend.app.runtime.sandbox_tools import sandbox_code_tool
 from backend.app.runtime.cube_sandbox import SandboxUnavailable
 from backend.app.runtime.windows_tool import WindowsToolError
 from backend.app.runtime.a2a import DelegationBudget
-from backend.app.tools import ApprovalRequired
-from backend.app.tools import model_tool_names, filter_tools_for_agent
+from backend.app.tools import ApprovalRequired, chat_tool_requires_approval, filter_tools_for_agent, model_tool_names
 from backend.app.prompts import render_prompt
 from backend.app.provider.openai_compatible import ProviderError, complete_chat
 from backend.app.provider.streaming import stream_chat_events
@@ -574,7 +573,7 @@ async def send_message(session_id: str, payload: UserMessage, request: Request) 
                                 database_authorized = request.app.state.database_manager.is_tool_authorized(
                                     agent_id, definition["plugin_id"]
                                 )
-                            approved = definition["risk"] == "read_only"
+                            approved = not chat_tool_requires_approval(definition)
                             if database_authorized and not approved:
                                 approval_id = uuid4().hex
                                 approval_future = asyncio.get_running_loop().create_future()
