@@ -20,11 +20,11 @@ def record_event(
     output_tokens: int | None = None,
     estimated_cost: float | None = None,
     cost_currency: str | None = None,
-) -> None:
+) -> int:
     now = occurred_at or datetime.now(timezone.utc).isoformat()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
     with database_connection(database_path) as connection:
-        connection.execute(
+        cursor = connection.execute(
             "INSERT INTO run_events(occurred_at, run_id, session_id, level, subsystem, "
             "event_type, status, duration_ms, summary, input_tokens, output_tokens, estimated_cost, cost_currency) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -32,6 +32,9 @@ def record_event(
              summary[:500], input_tokens, output_tokens, estimated_cost, cost_currency),
         )
         connection.execute("DELETE FROM run_events WHERE occurred_at < ?", (cutoff,))
+        event_id = cursor.lastrowid
+        assert event_id is not None
+        return event_id
 
 
 def new_run_id() -> str:

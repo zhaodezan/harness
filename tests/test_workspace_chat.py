@@ -33,7 +33,8 @@ def test_workspace_chat_works_without_agents_and_requires_a_model(tmp_path):
         assert client.get('/api/agents').json() == []
     assert len(requests) == 1 and requests[0]['model'] == 'workspace'
     assert requests[0]['messages'] == [{'role': 'user', 'content': 'hello'}]
-    assert not requests[0].get('tools')
+    generated = [tool for tool in requests[0]['tools'] if 'Python' in tool['function']['description']]
+    assert len(generated) == 1 and 'selected local working directory' in generated[0]['function']['description']
 
 
 def test_workspace_search_branch_history_and_delegation_are_separate(tmp_path):

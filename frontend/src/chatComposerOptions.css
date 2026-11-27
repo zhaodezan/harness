@@ -22,7 +22,12 @@
 .chat-model-option { display: grid; gap: 1px; width: 100%; margin-top: 4px; text-align: left; overflow-wrap: anywhere; }
 .chat-model-option[aria-pressed='true'], .chat-model-option:hover { background: #dfe9e0; }
 .chat-model-option small { color: #526457; }
-.chat-picker button:focus-visible, .chat-picker input:focus-visible, .chat-capability-chip button:focus-visible { outline: 2px solid #4f7159; outline-offset: 2px; }
+.chat-picker button:focus-visible, .chat-picker input:focus-visible, .chat-capability-chip button:focus-visible, .approval-mode-picker select:focus-visible { outline: 2px solid #4f7159; outline-offset: 2px; }
+.approval-mode-picker { display: inline-flex; align-items: center; gap: 0.35rem; flex-shrink: 0; }
+.approval-mode-picker span { color: #526457; font-size: 0.75rem; white-space: nowrap; }
+.approval-mode-picker select { min-height: 25px; max-width: 112px; padding: 3px 5px; border: 1px solid #dbe6db; border-radius: 6px; background: #f7faf7; color: #405647; font-size: 11px; }
+.approval-mode-picker select:disabled { cursor: not-allowed; opacity: 0.65; }
+
 .composer-tools .mode-chip { flex-shrink: 0; white-space: nowrap; }
 @media (max-width: 640px) {
   .composer-tools .mode-chip { display: none; }

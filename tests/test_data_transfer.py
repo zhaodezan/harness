@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 
 from backend.app.db import database_connection
@@ -58,6 +60,7 @@ def test_backup_round_trip_remaps_mcp_tool_authorizations(tmp_path):
         })
         payload = client.get("/api/data/export").json()
 
+    payload['mcp_servers'][0]['auto_connect'] = True  # Imported data cannot authorize automatic connections.
     target = create_app(tmp_path / "mcp-target.sqlite3")
     with TestClient(target) as client:
         response = client.post("/api/data/import", json=payload)
@@ -66,6 +69,7 @@ def test_backup_round_trip_remaps_mcp_tool_authorizations(tmp_path):
 
     assert response.status_code == 200
     assert restored_server["id"] != server["id"]
+    assert not restored_server["auto_connect"]
     assert restored_agent["selected_mcp_tools"] == [f"mcp:{restored_server['id']}:lookup"]
 
 
@@ -97,3 +101,20 @@ def test_export_and_import_round_trip_agent_sessions_and_messages_without_secret
     assert new_agent["id"] != agent["id"]
     assert new_session["title"] == "Notes"
     assert [item["content"] for item in messages] == ["question"]
+
+
+def test_backup_does_not_transfer_local_image_references(tmp_path):
+    db = tmp_path / 'session.sqlite3'
+    with TestClient(create_app(db, data_dir=tmp_path / 'data')) as client:
+        session = client.post('/api/sessions', json={}).json()['id']
+        metadata = {'images': [{'id': 'a' * 32, 'label': 'local photo'}]}
+        with database_connection(db) as connection:
+            connection.execute("INSERT INTO messages(id,session_id,role,content,metadata_json) VALUES('photo',?,'assistant','picture',?)",
+                               (session, json.dumps(metadata)))
+        payload = client.get('/api/data/export').json()
+        assert 'images' not in json.loads(payload['messages'][0]['metadata_json'])
+        payload['messages'][0]['metadata_json'] = json.dumps(metadata)
+        assert client.post('/api/data/import', json=payload).status_code == 200
+        imported = next(item['id'] for item in client.get('/api/sessions').json() if item['id'] != session)
+        (restored,) = client.get(f'/api/sessions/{imported}/messages').json()
+        assert restored['content'] == 'picture' and 'images' not in restored

@@ -5,14 +5,15 @@ import hashlib
 import inspect
 import json
 import re
+import sys
 import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from backend.app.runtime.windows_tool import WindowsToolError
+from backend.app.runtime.windows_tool import WindowsToolError, tool_execution_mode, tool_workspace
 
 from backend.app.function_tools import function_tool_metadata
-from backend.app.runtime.cube_sandbox import SandboxUnavailable
+from backend.app.runtime.docker_sandbox import DockerSandboxUnavailable
 from backend.app.tools import ToolDefinition, ToolRegistry
 
 MAX_TOOL_SOURCE_BYTES = 256 * 1024
@@ -31,43 +32,9 @@ class LocalToolManager:
         self.windows_executor = windows_executor
         self._installed: dict[str, dict[str, Any]] = {}
 
-    def _sandbox_path(self, tool_id: str) -> Path:
-        return self.tools_dir / f'{tool_id}.windows-sandbox'
-
     @staticmethod
     def _digest(source: str) -> str:
         return hashlib.sha256(source.encode('utf-8')).hexdigest()
-
-    def _sandbox_selected(self, tool_id: str) -> bool:
-        try:
-            self._sandbox_path(tool_id).stat()
-        except FileNotFoundError:
-            return False
-        except OSError:
-            return True
-        return True
-
-    def set_windows_trust(self, tool_id: str, *, source_sha256: str | None = None) -> dict[str, Any]:
-        if not TOOL_ID_PATTERN.fullmatch(tool_id) or tool_id not in self._installed:
-            raise KeyError(tool_id)
-        item = self._installed[tool_id]
-        if item['status'] != 'loaded':
-            raise ValueError('请先修复工具源码')
-        path = self._sandbox_path(tool_id)
-        source = item['source']
-        if source_sha256 is not None:
-            if not item['windows_local_available']:
-                raise ValueError('仅支持已静态验证的简单只读函数，其他工具继续使用 CubeSandbox')
-            if source_sha256 != self._digest(source) or (self.tools_dir / f'{tool_id}.py').read_text(encoding='utf-8') != source:
-                raise RuntimeError('工具源码已修改，请重新查看后确认')
-            path.unlink(missing_ok=True)
-        else:
-            path.touch(exist_ok=True)
-        definition, metadata = self._definition(source, tool_id)
-        self.registry.unregister(item['name'])
-        self.registry.register(definition)
-        item.update(metadata)
-        return dict(item)
 
     def install_source(self, source: str) -> dict[str, Any]:
         source = source.replace('\r\n', '\n').replace('\r', '\n')
@@ -117,7 +84,7 @@ class LocalToolManager:
             raise KeyError(tool_id)
         source = source.replace('\r\n', '\n').replace('\r', '\n')
         self._validate_source_size(source)
-        # Revalidate each revision while retaining a user's explicit sandbox preference.
+        # Revalidate every revision; historical marker files do not select runtime mode.
         definition, metadata = self._definition(source, tool_id)
         previous_name = current["name"]
         temporary = path.with_suffix(".py.tmp")
@@ -158,7 +125,7 @@ class LocalToolManager:
         if item is None:
             return False
         self.registry.unregister(item["name"])
-        self._sandbox_path(tool_id).unlink(missing_ok=True)
+        (self.tools_dir / f'{tool_id}.windows-sandbox').unlink(missing_ok=True)
         (self.tools_dir / f'{tool_id}.windows-trust').unlink(missing_ok=True)
         (self.tools_dir / f"{tool_id}.py").unlink(missing_ok=True)
         return True
@@ -210,34 +177,62 @@ class LocalToolManager:
         self._validate_schema(schema)
         if risk not in {"read_only", "side_effect"}:
             raise ValueError("Tool 风险级别必须是 read_only 或 side_effect")
-        local_available = bool(function_name is not None and risk == 'read_only' and self.windows_executor is not None and self.windows_executor.available)
-        local_mode = local_available and not self._sandbox_selected(tool_id)
+        if metadata_node is not None:
+            # Legacy modules execute arbitrary source and cannot self-certify as read-only.
+            risk = 'side_effect'
+        local_available = bool(
+            sys.platform == 'win32'
+            and self.windows_executor is not None
+            and self.windows_executor.available
+        )
         normalized = {"name": name.strip(), "description": description.strip(), "input_schema": schema, "risk": risk,
-                      'execution_mode': 'windows_local' if local_mode else 'sandbox',
+                      'execution_mode': 'windows_local' if local_available else 'sandbox',
                       'windows_local_available': local_available, 'source_sha256': self._digest(source)}
 
+        def ensure_source_unchanged() -> None:
+            try:
+                unchanged = (self.tools_dir / f'{tool_id}.py').read_text(encoding='utf-8') == source
+            except (OSError, UnicodeError):
+                unchanged = False
+            if not unchanged:
+                raise WindowsToolError('工具源码已修改，请重新加载并确认')
+
         async def run_in_sandbox(arguments: dict[str, Any]):
-            if local_mode:
-                if self._sandbox_selected(tool_id):
-                    raise WindowsToolError('工具已切换至 CubeSandbox，请重新调用')
-                try:
-                    unchanged = (self.tools_dir / f'{tool_id}.py').read_text(encoding='utf-8') == source
-                except (OSError, UnicodeError):
-                    unchanged = False
-                if not unchanged:
-                    raise WindowsToolError('工具源码已修改，请重新加载并确认')
-                return await self.windows_executor.execute(source, arguments, function_name=function_name)
             if self.sandbox_executor is None:
-                raise SandboxUnavailable("CubeSandbox 未配置，已拒绝在本机执行 Python Tool")
+                raise DockerSandboxUnavailable("Docker 沙箱未配置，已拒绝在本机执行 Python Tool")
             if function_name is None:
                 result = self.sandbox_executor(source, arguments)
             else:
                 result = self.sandbox_executor(source, arguments, function_name=function_name)
             return await result if inspect.isawaitable(result) else result
 
+        async def run_tool(arguments: dict[str, Any]):
+            ensure_source_unchanged()
+            mode = tool_execution_mode.get()
+            if mode == 'sandbox':
+                if self.sandbox_executor is None:
+                    raise DockerSandboxUnavailable("已选择 Docker 沙箱，但沙箱执行器不可用；未回退到本机执行")
+                return await run_in_sandbox(arguments)
+
+            if mode == 'local' and sys.platform == 'win32' and (
+                self.windows_executor is None or not self.windows_executor.available
+            ):
+                raise WindowsToolError('Windows PowerShell 本机执行不可用；请检查运行环境或明确选择 Docker 沙箱')
+
+            # Windows' default (including the legacy None context) is native
+            # PowerShell when it is available.  On other platforms, keep the
+            # existing sandbox fallback for old callers and explicit local mode.
+            if sys.platform == 'win32' and self.windows_executor is not None and self.windows_executor.available:
+                workspace = tool_workspace.get()
+                return await self.windows_executor.execute(
+                    source, arguments, function_name=function_name,
+                    cwd=Path(workspace) if workspace else None,
+                )
+            return await run_in_sandbox(arguments)
+
         return ToolDefinition(
             name=normalized["name"], description=normalized["description"],
-            input_schema=schema, risk=risk, handler=run_in_sandbox, plugin_id=tool_id,
+            input_schema=schema, risk=risk, handler=run_tool, plugin_id=tool_id,
         ), normalized
 
     @staticmethod

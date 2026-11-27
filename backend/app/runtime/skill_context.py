@@ -44,7 +44,7 @@ def skill_script_tool(existing_tools: list[dict]) -> dict:
         name = f"skill:run_python:{uuid.uuid4().hex[:8]}"
     return {
         "name": name,
-        "description": "Run an explicitly selected Python script from one of this Agent's loaded Skills in an ephemeral CubeSandbox.",
+        "description": "Run an explicitly selected Python script from one of this Agent's loaded Skills in an ephemeral Docker sandbox.",
         "input_schema": {"type": "object", "properties": {"skill_name": {"type": "string", "maxLength": 128}, "path": {"type": "string", "maxLength": 1024}, "arguments": {"type": "object"}}, "required": ["skill_name", "path", "arguments"], "additionalProperties": False},
         "risk": "side_effect", "plugin_id": "internal:skill-python",
     }
@@ -121,8 +121,12 @@ def read_skill_resource(skill: Skill, relative_path: str) -> str:
         raise ValueError("Skill 资源必须是 UTF-8 文本") from None
 
 
+def resolve_skill_script(skill: Skill, relative_path: str):
+    return _safe_skill_path(skill, relative_path, {'.py'})
+
+
 def read_skill_script(skill: Skill, relative_path: str) -> str:
-    resolved = _safe_skill_path(skill, relative_path, {".py"})
+    resolved = resolve_skill_script(skill, relative_path)
     content = resolved.read_bytes()
     if len(content) > MAX_SKILL_SCRIPT_BYTES:
         raise ValueError("Skill Python 脚本不能大于 256 KiB")

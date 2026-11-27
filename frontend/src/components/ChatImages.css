@@ -1,0 +1,5 @@
+.chat-images { display: grid; gap: 10px; margin-top: 10px; min-width: 0; }
+.chat-image { margin: 0; max-width: 100%; }
+.chat-image a { display: inline-block; max-width: 100%; vertical-align: top; }
+.chat-image img { display: block; max-width: 100%; max-height: min(420px, 65vh); height: auto; object-fit: contain; border-radius: 8px; }
+.chat-image figcaption, .chat-image p { margin: 4px 0 0; font-size: 12px; overflow-wrap: anywhere; }

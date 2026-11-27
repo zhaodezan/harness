@@ -1,6 +1,10 @@
+import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.db import database_connection
 from backend.app.main import create_app
+from model_test_utils import create_test_model
+from test_chat_options import Secrets
 
 
 def test_startup_wizard_completes_without_secrets_and_connects_model(tmp_path):
@@ -34,3 +38,15 @@ def test_startup_wizard_completes_without_secrets_and_connects_model(tmp_path):
         assert agents[0]["input_rate_per_million"] is None
         assert agents[0]["output_rate_per_million"] is None
         assert "wizard-key" not in setup.text
+
+
+@pytest.mark.parametrize('limit,status', [(0, 422), (-2, 422), (10001, 422), (True, 422), (-1, 201), (1, 201), (10000, 201)])
+def test_setup_model_validates_round_limit(tmp_path, limit, status):
+    app = create_app(tmp_path / 'setup-rounds.sqlite3', data_dir=tmp_path / 'data', secret_store=Secrets())
+    with TestClient(app, raise_server_exceptions=False) as client:
+        model_id = create_test_model(client)
+        response = client.post('/api/setup/model', json={'name': 'Round limit', 'model_config_id': model_id, 'max_rounds': limit})
+        assert response.status_code == status
+        with database_connection(app.state.database_path) as connection:
+            values = connection.execute('SELECT max_rounds FROM agents').fetchall()
+        assert [row['max_rounds'] for row in values] == ([limit] if status == 201 else [])

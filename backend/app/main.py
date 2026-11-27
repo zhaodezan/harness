@@ -19,13 +19,17 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.app.db import database_connection, initialize_database
+from backend.app.chat_images import prune_chat_images, router as chat_images_router
 from backend.app.mcp import MCPManager
+from backend.app.mcp_connections import MCPConnections
 from backend.app.maintenance import prune_expired_events
 from backend.app.recovery import mark_interrupted_runs
 from backend.app.runtime.a2a import A2AService
 from backend.app.runtime.agent_runner import AgentTaskRunner
-from backend.app.runtime.cube_sandbox import SandboxExecutor
+from backend.app.runtime.docker_sandbox import DockerSandboxExecutor
 from backend.app.runtime.windows_tool import WindowsToolExecutor
+from backend.app.runtime.local_code import LocalCodeExecutor
+from backend.app.runtime.skill_cli import SkillCLIExecutor
 from backend.app.routes.agents import router as agents_router
 from backend.app.routes.models import router as models_router
 from backend.app.routes.approvals import router as approvals_router
@@ -45,6 +49,7 @@ from backend.app.routes.sandbox import router as sandbox_router
 from backend.app.routes.knowledge_bases import router as knowledge_bases_router
 from backend.app.routes.memories import router as memories_router
 from backend.app.routes.sessions import router as sessions_router
+from backend.app.routes.workspaces import router as workspaces_router
 from backend.app.secrets import SecretStore, SystemSecretStore
 from backend.app.settings import get_data_dir
 
@@ -83,14 +88,21 @@ def create_app(
         application.state.agent_task_runner = AgentTaskRunner(application, application.state.a2a_service)
         application.state.a2a_service.runner = application.state.agent_task_runner
         application.state.mcp_manager = MCPManager(application.state.http_client)
+        application.state.mcp_connections = MCPConnections(
+            resolved_database_path, application.state.secret_store,
+            application.state.mcp_manager, application.state.tool_registry,
+        )
         application.state.local_tool_manager.load_installed()
         prune_expired_events(resolved_database_path)
+        await asyncio.to_thread(prune_chat_images, application.state)
         async def maintain_data():
             while True:
                 await asyncio.sleep(3600)
                 prune_expired_events(resolved_database_path)
+                await asyncio.to_thread(prune_chat_images, application.state)
         maintenance_task = asyncio.create_task(maintain_data())
         try:
+            await application.state.mcp_connections.restore()
             yield
         finally:
             await application.state.scheduler.stop()
@@ -99,7 +111,7 @@ def create_app(
                 await maintenance_task
             except asyncio.CancelledError:
                 pass
-            await application.state.mcp_manager.close()
+            await application.state.mcp_connections.close()
             await application.state.http_client.aclose()
 
     application = FastAPI(title="Local Agent Harness", lifespan=lifespan)
@@ -124,15 +136,25 @@ def create_app(
     def sandbox_settings():
         with database_connection(application.state.database_path) as connection:
             row = connection.execute(
-                "SELECT value_json FROM app_settings WHERE key='cubesandbox'"
+                "SELECT value_json FROM app_settings WHERE key='docker_sandbox'"
             ).fetchone()
         if row is None:
             return None
-        values = json.loads(row["value_json"])
-        values["api_key"] = application.state.secret_store.get("cubesandbox:api_key") or ""
-        return values
+        try:
+            values = json.loads(row["value_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(values, dict):
+            return None
+        # Only the local Docker configuration is accepted.  In particular,
+        # Historical remote sandbox settings are never converted or exposed.
+        return {key: values[key] for key in (
+            "enabled", "image", "timeout_seconds", "memory_mb", "cpu_count", "network_enabled"
+        ) if key in values}
 
-    application.state.sandbox_executor = SandboxExecutor(sandbox_settings)
+    application.state.sandbox_executor = DockerSandboxExecutor(sandbox_settings)
+    application.state.local_code_executor = LocalCodeExecutor()
+    application.state.skill_cli_executor = SkillCLIExecutor()
     application.state.local_tool_manager = LocalToolManager(
         application.state.plugin_store.tools_dir, application.state.tool_registry,
         sandbox_executor=application.state.sandbox_executor.execute_python_async,
@@ -178,6 +200,8 @@ def create_app(
     application.include_router(debug_router)
     application.include_router(setup_router)
     application.include_router(sessions_router)
+    application.include_router(chat_images_router)
+    application.include_router(workspaces_router)
     application.include_router(logs_router)
     application.include_router(sandbox_router)
     application.include_router(knowledge_bases_router)

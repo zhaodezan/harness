@@ -16,7 +16,7 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 _AGENT_SELECT = (
     "SELECT a.id,a.name,a.provider,a.model_config_id,m.model,m.name AS model_config_name,"
     "a.system_prompt,a.mode,a.context_window,a.skill_directory,a.selected_skills_json,"
-    "a.selected_agents_json,a.sandbox_code_enabled,a.selected_mcp_tools_json,a.selected_local_tools_json,a.selected_knowledge_bases_json,a.selected_database_connections_json,a.prompt_variables_json,"
+    "a.selected_agents_json,a.sandbox_code_enabled,a.max_rounds,a.selected_mcp_tools_json,a.selected_local_tools_json,a.selected_knowledge_bases_json,a.selected_database_connections_json,a.prompt_variables_json,"
     "a.input_rate_per_million,a.output_rate_per_million,a.created_at,a.updated_at "
     "FROM agents a LEFT JOIN model_configs m ON m.id=a.model_config_id "
 )
@@ -119,12 +119,12 @@ def create_agent(payload: AgentCreate, request: Request) -> AgentResponse:
         selected_database_connections = _validate_database_connections(connection, selected_database_connections)
         selected_agents = _validate_delegation_targets(connection, agent_id, payload.selected_agents)
         connection.execute(
-            "INSERT INTO agents(id,name,provider,base_url,model,system_prompt,mode,context_window,skill_directory,selected_skills_json,selected_agents_json,sandbox_code_enabled,selected_mcp_tools_json,selected_local_tools_json,selected_knowledge_bases_json,selected_database_connections_json,prompt_variables_json,input_rate_per_million,output_rate_per_million,model_config_id) "
-            "VALUES(?,?,?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO agents(id,name,provider,base_url,model,system_prompt,mode,context_window,skill_directory,selected_skills_json,selected_agents_json,sandbox_code_enabled,max_rounds,selected_mcp_tools_json,selected_local_tools_json,selected_knowledge_bases_json,selected_database_connections_json,prompt_variables_json,input_rate_per_million,output_rate_per_million,model_config_id) "
+            "VALUES(?,?,?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 agent_id, payload.name, payload.provider, payload.system_prompt, payload.mode,
                 payload.context_window, payload.skill_directory, json.dumps(payload.selected_skills),
-                json.dumps(selected_agents), int(payload.sandbox_code_enabled),
+                json.dumps(selected_agents), int(payload.sandbox_code_enabled), payload.max_rounds,
                 json.dumps(payload.selected_mcp_tools), json.dumps(payload.selected_local_tools),
                 json.dumps(selected_knowledge_bases), json.dumps(selected_database_connections),
                 json.dumps(payload.prompt_variables), payload.input_rate_per_million,

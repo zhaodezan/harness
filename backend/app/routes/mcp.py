@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from backend.app.db import database_connection
 from backend.app.mcp import MCPError
-from backend.app.tools import ToolDefinition
+
 
 SUPPORTED_TRANSPORTS = {"stdio", "sse", "streamable_http"}
 router = APIRouter(prefix="/api/mcp/servers", tags=["mcp"])
@@ -44,19 +44,13 @@ class ConfirmStart(BaseModel):
     confirmed: bool
 
 
-def _config(row):
-    item = dict(row)
-    item["args"] = json.loads(item.pop("args_json"))
-    item["connected"] = item["id"] in getattr(row, "connected_ids", set())
-    return item
-
-
 @router.get("")
 def list_servers(request: Request):
     connected = set(request.app.state.mcp_manager.servers)
+    errors = request.app.state.mcp_connections.errors
     with database_connection(request.app.state.database_path) as connection:
         rows = connection.execute(
-            "SELECT id,name,transport,command,args_json,cwd,url,enabled,env_names_json,created_at FROM mcp_servers ORDER BY name"
+            "SELECT id,name,transport,command,args_json,cwd,url,enabled,env_names_json,created_at,auto_connect FROM mcp_servers ORDER BY name"
         ).fetchall()
     result = []
     for row in rows:
@@ -65,6 +59,8 @@ def list_servers(request: Request):
         item["args"] = json.loads(item.pop("args_json"))
         item["env_names"] = json.loads(item.pop("env_names_json") or "[]")
         item["connected"] = item["id"] in connected
+        item["auto_connect"] = bool(item["auto_connect"])
+        item["connection_error"] = errors.get(item["id"])
         result.append(item)
     return result
 
@@ -93,40 +89,19 @@ def create_server(payload: MCPServerCreate, request: Request):
 async def connect_server(server_id: str, payload: ConfirmStart, request: Request):
     if not payload.confirmed:
         raise HTTPException(status_code=409, detail="连接 MCP Server 前需要确认启动命令或远程地址")
-    with database_connection(request.app.state.database_path) as connection:
-        row = connection.execute("SELECT * FROM mcp_servers WHERE id = ? AND enabled = 1", (server_id,)).fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail="MCP Server 不存在或已禁用")
-    config = dict(row)
-    config["transport"] = normalize_transport(config["transport"])
-    config["args"] = json.loads(config.pop("args_json"))
-    env_names = json.loads(config.pop("env_names_json", "[]") or "[]")
-    config["env"] = {name: request.app.state.secret_store.get(f"mcp:{server_id}:env:{name}") or "" for name in env_names}
-    config["bearer_token"] = request.app.state.secret_store.get(f"mcp:{server_id}:bearer_token") or ""
-    manager = request.app.state.mcp_manager
-    if server_id in manager.servers:
-        return {"status": "connected", "tools": [f"{manager.servers[server_id]['name']}/{item['name']}" for item in manager.servers[server_id]['tools']]}
     try:
-        discovered = await manager.connect(config)
-        for item in discovered:
-            local_name = f"{config['name']}/{item['name']}"
-            annotation = item.get("annotations") or {}
-            risk = "read_only" if annotation.get("readOnlyHint") is True else "side_effect"
-            request.app.state.tool_registry.register(ToolDefinition(
-                name=local_name,
-                description=(item.get("description") or f"MCP tool from {config['name']}")[:1000],
-                input_schema=item.get("inputSchema") or {"type": "object", "properties": {}, "additionalProperties": False},
-                risk=risk,
-                handler=lambda arguments, mcp_manager=manager, sid=server_id, remote_name=item["name"]: mcp_manager.call_tool(sid, remote_name, arguments),
-                plugin_id=f"mcp:{server_id}:{item['name']}",
-            ))
+        tools = await request.app.state.mcp_connections.connect(server_id, confirmed=True)
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="连接 MCP Server 超时") from None
     except MCPError as error:
         raise HTTPException(status_code=502, detail=str(error)) from None
     except OSError:
         raise HTTPException(status_code=502, detail="无法启动或连接 MCP Server，请检查命令、路径和权限") from None
-    except ValueError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from None
-    return {"status": "connected", "tools": [tool["name"] for tool in discovered]}
+    except (ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=409, detail="无法加载 MCP 工具，请检查配置、工具定义或名称冲突") from None
+    if tools is None:
+        raise HTTPException(status_code=404, detail="MCP Server 不存在或已禁用")
+    return {"status": "connected", "tools": tools}
 
 
 @router.get("/{server_id}/tools")
@@ -149,11 +124,8 @@ def list_server_tools(server_id: str, request: Request):
 
 @router.post("/{server_id}/disconnect")
 async def disconnect_server(server_id: str, request: Request):
-    manager = request.app.state.mcp_manager
-    state = manager.servers.get(server_id)
-    prefix = f"{state['name']}/" if state else ""
-    await manager.disconnect(server_id)
-    request.app.state.tool_registry.unregister_prefix(prefix)
+    if not await request.app.state.mcp_connections.disconnect(server_id):
+        raise HTTPException(status_code=404, detail="MCP Server 不存在")
     return {"status": "disconnected"}
 
 
@@ -169,11 +141,7 @@ async def delete_server(server_id: str, request: Request):
             references.append(agent["name"])
     if references:
         raise HTTPException(status_code=409, detail=f"MCP 工具正被智能体使用：{', '.join(references)}")
-    manager = request.app.state.mcp_manager
-    state = manager.servers.get(server_id)
-    if state:
-        await manager.disconnect(server_id)
-        request.app.state.tool_registry.unregister_prefix(f"{state['name']}/")
+    await request.app.state.mcp_connections.disconnect(server_id)
     with database_connection(request.app.state.database_path) as connection:
         cursor = connection.execute("DELETE FROM mcp_servers WHERE id = ?", (server_id,))
     if not cursor.rowcount:

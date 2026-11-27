@@ -4,6 +4,7 @@ from backend.app.db import database_connection
 from backend.app.prompts import render_prompt
 from backend.app.provider.openai_compatible import ProviderError
 from backend.app.provider.streaming import stream_chat_events
+from backend.app.runtime.model_rounds import ModelRoundCounter
 from backend.app.runtime.skill_context import build_skill_context
 from backend.app.skills import discover_skills
 from backend.app.tools import filter_tools_for_agent, model_tool_names
@@ -20,7 +21,7 @@ class AgentTaskRunner:
         with database_connection(self.app.state.database_path) as connection:
             row = connection.execute(
                 "SELECT a.id,a.name,a.system_prompt,a.prompt_variables_json,a.skill_directory,a.selected_skills_json,"
-                "a.selected_agents_json,a.selected_mcp_tools_json,a.selected_local_tools_json,a.selected_database_connections_json,"
+                "a.selected_agents_json,a.selected_mcp_tools_json,a.selected_local_tools_json,a.selected_database_connections_json,a.max_rounds,"
                 "m.base_url,m.model,a.model_config_id FROM agents a "
                 "LEFT JOIN model_configs m ON m.id=a.model_config_id WHERE a.id=?", (agent_id,),
             ).fetchone()
@@ -61,7 +62,9 @@ class AgentTaskRunner:
             "name": names[tool["name"]], "description": tool["description"], "parameters": tool["input_schema"],
         }} for tool in registered]
 
-        for _ in range(8):
+        round_counter = ModelRoundCounter(row['max_rounds'])
+        while True:
+            round_counter.start_call()
             tool_calls = []
             answer = []
             async for event in stream_chat_events(
@@ -103,4 +106,3 @@ class AgentTaskRunner:
                 except Exception:
                     result = {"error": "被委派 Agent 的只读工具执行失败或未获授权"}
                 messages.append({"role": "tool", "tool_call_id": call["id"], "content": json.dumps(result, ensure_ascii=False)[:12000]})
-        raise ProviderError("被委派 Agent 的工具调用次数达到上限")

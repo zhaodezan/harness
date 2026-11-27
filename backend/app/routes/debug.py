@@ -4,9 +4,10 @@ import uuid
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from fastapi.responses import StreamingResponse
 
+from backend.app.chat_images import MAX_IMAGES, collect_skill_images, public_images
 from backend.app.db import database_connection
 from backend.app.knowledge_base import format_knowledge_context, retrieve_authorized_documents
 from backend.app.prompts import render_prompt
@@ -16,9 +17,15 @@ from backend.app.runtime.planning import parse_plan_steps
 from backend.app.skills import discover_skills
 from backend.app.runtime.skill_context import build_skill_context, read_skill_resource, read_skill_script, skill_resource_tool, skill_script_tool
 from backend.app.runtime.a2a import DelegationBudget
-from backend.app.runtime.sandbox_tools import sandbox_code_tool
-from backend.app.runtime.cube_sandbox import SandboxUnavailable
+from backend.app.runtime.skill_cli import execute_skill_cli, skill_cli_display_arguments, skill_cli_enabled, skill_cli_tool
+from backend.app.runtime.sandbox_tools import sandbox_code_tool, execute_generated_code, execute_skill_script, generated_code_approval
+from backend.app.routes.workspaces import WorkspaceChoice, debug_workspace, validate_execution_mode
+from backend.app.runtime.windows_tool import use_tool_workspace
+from backend.app.runtime.docker_sandbox import DockerSandboxUnavailable
 from backend.app.runtime.windows_tool import WindowsToolError
+from backend.app.runtime.model_rounds import ModelRoundCounter, MaxRoundsExceeded
+from backend.app.runtime.tool_trace import encode_trace_payload, tool_trace_details
+from backend.app.runtime.approval_policy import ApprovalMode, DEFAULT_APPROVAL_MODE, should_wait_for_approval
 from backend.app.tools import ApprovalRequired, chat_tool_requires_approval, filter_tools_for_agent, model_tool_names
 
 router = APIRouter(prefix="/api/agents", tags=["agent debug"])
@@ -42,19 +49,34 @@ class DebugConfig(BaseModel):
     selected_database_connections: list[str] = Field(default_factory=list, max_length=100)
     selected_agents: list[str] = Field(default_factory=list, max_length=20)
     sandbox_code_enabled: bool = False
+    max_rounds: int = Field(default=500, strict=True, ge=-1, le=10000)
+
+    @field_validator("max_rounds")
+    @classmethod
+    def valid_max_rounds(cls, value: int) -> int:
+        if value != -1 and not 1 <= value <= 10000:
+            raise ValueError("最大轮次必须为 -1 或 1 到 10000 的整数")
+        return value
 
 
 class DebugRequest(BaseModel):
     config: DebugConfig
     messages: list[DebugMessage] = Field(min_length=1, max_length=40)
+    workspace: WorkspaceChoice | None = None
+    approval_mode: ApprovalMode = DEFAULT_APPROVAL_MODE
 
 
 def _frame(event: str, payload: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
+    encoded = encode_trace_payload(payload) if event in {'trace', 'images'} else json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
+    return f"event: {event}\ndata: {encoded}\n\n"
 
 
 @router.post("/{agent_id}/debug")
 async def debug_agent(agent_id: str, payload: DebugRequest, request: Request):
+    await validate_execution_mode(
+        request,
+        payload.workspace.execution_mode if payload.workspace else 'local',
+    )
     config = payload.config
     knowledge_results: list[dict] = []
     knowledge_error = False
@@ -114,6 +136,19 @@ async def debug_agent(agent_id: str, payload: DebugRequest, request: Request):
         registered_tools.append(script_tool)
     with database_connection(request.app.state.database_path) as connection:
         agent_row = connection.execute("SELECT selected_agents_json,sandbox_code_enabled FROM agents WHERE id=?", (agent_id,)).fetchone()
+        workspace = debug_workspace(
+            connection, request, payload.workspace,
+            sandbox_validated_mode=(
+                payload.workspace.execution_mode
+                if payload.workspace and payload.workspace.execution_mode == 'sandbox'
+                else None
+            ),
+        )
+        model_rounds = ModelRoundCounter(config.max_rounds)
+    cli_tool = None
+    if script_tool and skill_cli_enabled(request.app.state, workspace):
+        cli_tool = skill_cli_tool(registered_tools)
+        registered_tools.append(cli_tool)
     saved_agents = set(json.loads(agent_row["selected_agents_json"] or "[]")) if agent_row else set()
     allowed_agents = [target for target in config.selected_agents if target in saved_agents]
     code_enabled = bool(config.sandbox_code_enabled and agent_row and agent_row["sandbox_code_enabled"])
@@ -122,7 +157,7 @@ async def debug_agent(agent_id: str, payload: DebugRequest, request: Request):
     )
     if delegation_tool:
         registered_tools.append(delegation_tool)
-    code_tool = sandbox_code_tool(registered_tools) if code_enabled else None
+    code_tool = sandbox_code_tool(registered_tools, mode=workspace['execution_mode']) if code_enabled else None
     if code_tool:
         registered_tools.append(code_tool)
     provider_names = model_tool_names([tool["name"] for tool in registered_tools])
@@ -143,8 +178,12 @@ async def debug_agent(agent_id: str, payload: DebugRequest, request: Request):
             request_messages.insert(last_user_index, {"role": "system", "content": context})
         execution_messages = list(request_messages)
         delegation_budget = DelegationBudget([agent_id])
-        def trace(event_type: str, status: str, summary: str) -> str:
-            return _frame("trace", {"event_type": event_type, "status": status, "summary": summary})
+        tool_event_id = 0
+        images: list[dict] = []
+        image_sources = set()
+
+        def trace(event_type: str, status: str, summary: str, **details) -> str:
+            return _frame("trace", {"event_type": event_type, "status": status, "summary": summary, **details})
 
         try:
             yield trace("run_started", "running", f"调试运行开始 · 模型：{model['model']}")
@@ -166,6 +205,7 @@ async def debug_agent(agent_id: str, payload: DebugRequest, request: Request):
                     *messages,
                 ]
                 plan_parts = []
+                model_rounds.start_call()
                 async for planning_event in stream_chat_events(
                     request.app.state.http_client, base_url=model["base_url"], model=model["model"],
                     api_key=api_key, messages=planning_messages, tools=[],
@@ -186,7 +226,8 @@ async def debug_agent(agent_id: str, payload: DebugRequest, request: Request):
                         "role": "user",
                         "content": f"现在只执行计划第 {step_index} 步：{step}。完成后简要报告；不要提前执行后续步骤。",
                     })
-                for _ in range(8):
+                while True:
+                    model_rounds.start_call()
                     calls = []
                     async for event in stream_chat_events(
                         request.app.state.http_client, base_url=model["base_url"], model=model["model"],
@@ -197,18 +238,21 @@ async def debug_agent(agent_id: str, payload: DebugRequest, request: Request):
                         elif event["type"] == "tool_calls":
                             calls = event["tool_calls"]
                             for call in calls:
+                                call["provider_name"] = call["name"]
                                 call["name"] = reverse_names.get(call["name"], "")
                     if not calls:
                         break
                     execution_messages.append({
                         "role": "assistant", "content": None,
                         "tool_calls": [{"id": call["id"], "type": "function", "function": {
-                            "name": call["name"], "arguments": json.dumps(call["arguments"], ensure_ascii=False),
+                            "name": call["provider_name"], "arguments": json.dumps(call["arguments"], ensure_ascii=False),
                         }} for call in calls],
                     })
                     for call in calls:
                         definition = next((tool for tool in registered_tools if tool["name"] == call["name"]), None)
                         tool_name = call['name'] or '未知工具'
+                        display_arguments = (skill_cli_display_arguments(call['arguments'])
+                                             if cli_tool is not None and definition is cli_tool else call['arguments'])
                         yield trace("tool_started", "running", f"收到工具调用：{tool_name}")
                         if definition is None:
                             result = {"error": "Tool 未注册、未经授权或已禁用"}
@@ -219,17 +263,21 @@ async def debug_agent(agent_id: str, payload: DebugRequest, request: Request):
                                     agent_id, definition["plugin_id"],
                                     draft_connection_ids=config.selected_database_connections,
                                 )
-                            approved = not chat_tool_requires_approval(definition)
-                            if database_authorized and not approved:
+                            requires_approval = should_wait_for_approval(definition, payload.approval_mode)
+                            approved = not requires_approval
+                            if database_authorized and requires_approval:
                                 approval_id = uuid.uuid4().hex
                                 future = asyncio.get_running_loop().create_future()
                                 request.app.state.pending_approvals[approval_id] = future
                                 try:
                                     yield trace("approval_required", "waiting", f"等待确认工具：{tool_name}")
-                                    yield _frame("approval_required", {
+                                    approval = {
                                         "approval_id": approval_id, "tool_name": call["name"],
-                                        "description": definition["description"], "arguments": call["arguments"],
-                                    })
+                                        "description": definition["description"], "arguments": display_arguments,
+                                    }
+                                    if definition is code_tool or definition is cli_tool:
+                                        approval.update(generated_code_approval(workspace))
+                                    yield _frame("approval_required", approval)
                                     approved = await asyncio.wait_for(future, timeout=300)
                                 except asyncio.TimeoutError:
                                     approved = False
@@ -238,6 +286,11 @@ async def debug_agent(agent_id: str, payload: DebugRequest, request: Request):
                                 yield trace(
                                     "approval_decision", "approved" if approved else "rejected",
                                     f"工具 {tool_name}" + ("已获批准" if approved else "未获批准"),
+                                )
+                            elif database_authorized and chat_tool_requires_approval(definition) and payload.approval_mode == "allow_all":
+                                yield trace(
+                                    "approval_decision", "approved",
+                                    f"工具 {tool_name} 已按“全部允许”自动批准",
                                 )
                             try:
                                 if (definition.get("plugin_id") or "").startswith("internal:"):
@@ -278,35 +331,58 @@ async def debug_agent(agent_id: str, payload: DebugRequest, request: Request):
                                         raise ValueError("脚本不属于当前 Agent 已加载的 Skill")
                                     script = await asyncio.to_thread(read_skill_script, skill, call["arguments"].get("path"))
                                     args_json = json.dumps(call["arguments"].get("arguments", {}), ensure_ascii=False, allow_nan=False)
-                                    result = {"result": await request.app.state.sandbox_executor.execute_python_async(
-                                        script, json.loads(args_json),
+                                    result = {"result": await execute_skill_script(
+                                        request.app.state, workspace, script, json.loads(args_json),
                                     )}
-                                elif code_tool and call["name"] == code_tool["name"]:
-                                    result = {"result": await request.app.state.sandbox_executor.execute_python_async(
-                                        call["arguments"].get("code", ""), call["arguments"].get("arguments", {}),
-                                    )}
+                                elif definition is cli_tool:
+                                    skill = skill_context.loaded.get(call['arguments']['skill_name'])
+                                    if skill is None:
+                                        raise WindowsToolError('请先加载要执行的 Skill')
+                                    result = {'result': await execute_skill_cli(request.app.state, workspace, skill, call['arguments'])}
+                                elif definition is code_tool:
+                                    label = '本机工作目录' if workspace['execution_mode'] == 'local' else 'Docker 沙箱'
+                                    yield trace('python_execution', 'running', f'正在执行 Python · {label}')
+                                    result = {"result": await execute_generated_code(request.app.state, workspace, call['arguments'])}
                                 else:
                                     expected = registry_snapshot.get(call["name"])
                                     if expected is None:
                                         raise PermissionError("工具已不可用")
-                                    result = {"result": await registry.execute(
-                                        call["name"], call["arguments"], approved=approved, expected=expected,
-                                    )}
+                                    with use_tool_workspace(
+                                        workspace['path'] if workspace['execution_mode'] == 'local' else None,
+                                        execution_mode=workspace['execution_mode'],
+                                    ):
+                                        result = {"result": await registry.execute(
+                                            call["name"], call["arguments"], approved=approved, expected=expected,
+                                        )}
                             except ApprovalRequired:
                                 result = {"error": "用户未批准此操作；不要再次执行该操作"}
-                            except (SandboxUnavailable, WindowsToolError) as error:
+                            except (DockerSandboxUnavailable, WindowsToolError) as error:
                                 result = {"error": str(error)}
                             except Exception:
                                 result = {"error": "工具执行失败，请检查工具配置"}
-                        if "error" in result:
-                            yield trace("tool_completed", "failed", f"工具 {tool_name}：{result['error']}")
-                        else:
-                            yield trace("tool_completed", "completed", f"工具执行完成：{tool_name}")
+                        added = []
+                        if cli_tool is not None and definition is cli_tool and 'result' in result:
+                            added, result['result'] = await asyncio.to_thread(
+                                collect_skill_images, request.app.state, result['result'], workspace,
+                                debug=True, seen=image_sources, limit=MAX_IMAGES - len(images),
+                            )
+                        tool_status = 'failed' if 'error' in result else 'completed'
+                        tool_summary = (f"工具 {tool_name}：{result['error']}" if 'error' in result
+                                        else f"工具执行完成：{tool_name}")
+                        tool_event_id += 1
+                        yield trace('tool_completed', tool_status, tool_summary, id=tool_event_id,
+                                    tool_details=tool_trace_details(tool_name, display_arguments, result))
+                        if added:
+                            images.extend(added)
+                            yield _frame('images', {'images': public_images(images)})
                         execution_messages.append({"role": "tool", "tool_call_id": call["id"], "content": json.dumps(result, ensure_ascii=False)[:12000]})
                 if step is not None:
                     yield trace("plan_step_completed", "completed", f"第 {step_index}/{len(steps)} 步已完成")
             yield trace("run_completed", "completed", "调试运行完成")
             yield _frame("done", {})
+        except MaxRoundsExceeded as error:
+            yield trace('max_rounds_reached', 'stopped', str(error))
+            yield _frame('error', {'message': str(error)})
         except ProviderError as error:
             yield trace("model_error", "failed", "模型调用或运行失败")
             yield _frame("error", {"message": str(error)})
@@ -314,4 +390,4 @@ async def debug_agent(agent_id: str, payload: DebugRequest, request: Request):
             yield trace("run_failed", "failed", "调试运行失败")
             yield _frame("error", {"message": "调试运行失败，请检查工具配置或运行日志"})
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})

@@ -40,7 +40,7 @@ def test_side_effect_tool_waits_for_approval_before_execution(tmp_path):
                     "name": "Helper", "base_url": "https://example.test/v1", "model": "m",
                 })).json()
                 session = (await client.post("/api/sessions", json={"agent_id": agent["id"]})).json()
-                task = asyncio.create_task(client.post(f"/api/sessions/{session['id']}/messages", json={"content": "send mail"}))
+                task = asyncio.create_task(client.post(f"/api/sessions/{session['id']}/messages", json={"content": "send mail", "approval_mode": "user_approval"}))
                 for _ in range(100):
                     if app.state.pending_approvals:
                         break

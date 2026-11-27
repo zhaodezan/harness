@@ -54,7 +54,7 @@ def test_database_write_tool_waits_for_user_approval_before_mutating_source(tmp_
                 assert agent_response.status_code == 201, agent_response.text
                 session = (await client.post("/api/sessions", json={"agent_id": agent_response.json()["id"]})).json()
                 task = asyncio.create_task(client.post(
-                    f"/api/sessions/{session['id']}/messages", json={"content": "change the value"}
+                    f"/api/sessions/{session['id']}/messages", json={"content": "change the value", "approval_mode": "user_approval"}
                 ))
                 for _ in range(200):
                     if app.state.pending_approvals:

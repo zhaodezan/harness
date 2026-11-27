@@ -20,6 +20,38 @@ READ_ONLY_SOURCE = '''TOOL = {
 def run(arguments):
     return arguments["key"] + "-result"
 '''
+LEGACY_READ_ONLY_SOURCE = '''TOOL = {
+    "name": "legacy_lookup",
+    "description": "Legacy lookup",
+    "input_schema": {
+        "type": "object",
+        "properties": {"key": {"type": "string"}},
+        "required": ["key"],
+    },
+    "risk": "read_only",
+}
+def run(arguments):
+    return arguments["key"] + "-result"
+'''
+
+
+def test_legacy_read_only_claim_requires_approval_before_running(tmp_path):
+    calls = []
+
+    def sandbox_executor(source, arguments):
+        calls.append((source, arguments))
+        return 'executed'
+
+    registry = ToolRegistry()
+    manager = LocalToolManager(tmp_path / 'tools', registry, sandbox_executor=sandbox_executor)
+    item = manager.install_source(LEGACY_READ_ONLY_SOURCE)
+
+    assert item['risk'] == 'side_effect'
+    with pytest.raises(ApprovalRequired):
+        asyncio.run(registry.execute('legacy_lookup', {'key': 'x'}, approved=False))
+    assert calls == []
+    assert asyncio.run(registry.execute('legacy_lookup', {'key': 'x'}, approved=True)) == 'executed'
+    assert calls == [(LEGACY_READ_ONLY_SOURCE, {'key': 'x'})]
 
 
 def test_install_source_registers_declared_local_tool(tmp_path):
@@ -30,7 +62,7 @@ def test_install_source_registers_declared_local_tool(tmp_path):
 
     assert item["name"] == "lookup"
     assert item["description"] == "Lookup a value"
-    assert item["risk"] == "read_only"
+    assert item["risk"] == "side_effect"
     assert asyncio.run(registry.execute("lookup", {"key": "x"}, approved=True)) == "x-result"
 
 

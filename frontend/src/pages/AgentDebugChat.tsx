@@ -1,7 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { DEFAULT_APPROVAL_MODE, normalizeApprovalMode } from '../ChatComposerOptions';
+import type { ApprovalMode } from '../ChatComposerOptions';
 import { submitChatOnEnter } from '../chatKeyboard';
+import { WorkspacePicker } from '../components/WorkspacePicker';
+import type { WorkspaceChoice } from '../components/WorkspacePicker';
 import { createTypewriter } from '../typewriter';
 import { RunTracePanel } from '../components/RunTracePanel';
+import { ChatImages } from '../components/ChatImages';
+import type { ChatImage } from '../components/ChatImages';
 import { isTerminalTrace } from '../runTrace';
 import type { RunTrace } from '../runTrace';
 
@@ -18,8 +24,9 @@ type DebugConfig = {
   selected_database_connections: string[];
   selected_agents: string[];
   sandbox_code_enabled: boolean;
+  max_rounds: number;
 };
-type DebugMessage = { role: 'user' | 'assistant'; content: string; trace?: RunTrace[]; plan?: string };
+type DebugMessage = { role: 'user' | 'assistant'; content: string; trace?: RunTrace[]; plan?: string; images?: ChatImage[] };
 type Props = { agentId: string; config: DebugConfig };
 
 export function AgentDebugChat({ agentId, config }: Props) {
@@ -27,6 +34,21 @@ export function AgentDebugChat({ agentId, config }: Props) {
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('调试对话只保存在当前页面；配置改动会自动保存。');
+  const [workspaceChoice, setWorkspaceChoice] = useState<WorkspaceChoice>({ group_id: null, execution_mode: 'local' });
+  const [workspaceError, setWorkspaceError] = useState('');
+  const approvalStorageKey = `agent-harness:debug-approval-mode:${agentId}`;
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>(() => {
+    try {
+      return normalizeApprovalMode(window.sessionStorage.getItem(approvalStorageKey));
+    } catch {
+      return DEFAULT_APPROVAL_MODE;
+    }
+  });
+  useEffect(() => {
+    try { window.sessionStorage.setItem(approvalStorageKey, approvalMode); } catch { /* 存储不可用时不影响调试 */ }
+  }, [approvalStorageKey, approvalMode]);
+  const reportWorkspaceChoice = useCallback((choice: WorkspaceChoice) => setWorkspaceChoice(choice), []);
+  const reportWorkspaceError = useCallback((message: string) => setWorkspaceError(message), []);
   const active = useRef<AbortController | null>(null);
   useEffect(() => () => active.current?.abort(), [agentId]);
 
@@ -49,7 +71,7 @@ export function AgentDebugChat({ agentId, config }: Props) {
     try {
       const response = await fetch(`/api/agents/${agentId}/debug`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ config, messages: history.map(({ role, content }) => ({ role, content })) }), signal,
+        body: JSON.stringify({ config, workspace: workspaceChoice, approval_mode: approvalMode, messages: history.map(({ role, content }) => ({ role, content })) }), signal,
       });
       if (!response.ok || !response.body) {
         const body = await response.json().catch(() => ({}));
@@ -65,19 +87,27 @@ export function AgentDebugChat({ agentId, config }: Props) {
           const type = frame.match(/^event: (.+)$/m)?.[1];
           const data = frame.match(/^data: (.+)$/m)?.[1];
           if (!data) continue;
-          const payload = JSON.parse(data) as { text?: string; plan?: string; summary?: string; status?: string; event_type?: string; message?: string; approval_id?: string; tool_name?: string; arguments?: Record<string, unknown>; description?: string };
+          const payload = JSON.parse(data) as Partial<RunTrace> & { images?: ChatImage[]; text?: string; plan?: string; message?: string; approval_id?: string; tool_name?: string; arguments?: Record<string, unknown>; description?: string; execution_mode?: 'local' | 'sandbox'; working_directory?: string };
           if (type === 'delta') {
             writer.push(payload.text ?? '');
           } else if (type === 'trace') {
-            const item = { event_type: payload.event_type ?? 'debug_status', status: payload.status ?? 'running', summary: payload.summary ?? '调试运行中' };
+            const item: RunTrace = {
+              event_type: payload.event_type ?? 'debug_status', status: payload.status ?? 'running', summary: payload.summary ?? '调试运行中',
+              id: payload.id, tool_details: payload.tool_details,
+            };
             appendTrace(item);
             terminalReceived ||= isTerminalTrace(item);
+          } else if (type === 'images') {
+            updateReply((item) => ({ ...item, images: payload.images }));
           } else if (type === 'plan') {
             updateReply((item) => ({ ...item, plan: payload.plan ?? '' }));
           } else if (type === 'done') {
             terminalReceived = true;
           } else if (type === 'approval_required' && payload.approval_id) {
-            const approved = window.confirm(`${payload.description ?? '工具需要确认'}\n\n${payload.tool_name}\n${JSON.stringify(payload.arguments ?? {}, null, 2)}\n\n是否批准？`);
+            const location = payload.execution_mode === 'local'
+              ? `\n\n本机 PowerShell 目录：${payload.working_directory}\n本机 PowerShell 不是安全沙箱；权限由执行权限选择控制，代码可访问当前系统账号有权访问的资源。`
+              : payload.execution_mode === 'sandbox' ? '\n\n将在本地 Docker 沙箱运行。' : '';
+            const approved = window.confirm(`${payload.description ?? '工具需要确认'}${location}\n\n${payload.tool_name}\n${JSON.stringify(payload.arguments ?? {}, null, 2)}\n\n是否批准？`);
             const decision = await fetch(`/api/approvals/${payload.approval_id}`, {
               method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ approved }), signal,
             });
@@ -118,13 +148,24 @@ export function AgentDebugChat({ agentId, config }: Props) {
           {message.plan && <div className="debug-plan-card"><strong>执行计划</strong><pre>{message.plan}</pre></div>}
         </RunTracePanel>}
         <div className="debug-message-content">{message.content || (busy && index === messages.length - 1 ? '正在生成…' : '')}</div>
+        {message.role === 'assistant' && <ChatImages images={message.images}/>}
       </article>)}
     </div>
     <div className="agent-debug-status" role="status">{status}</div>
+    <label className="approval-mode-picker debug-approval-mode-picker">
+      <span>执行权限</span>
+      <select aria-label="工具执行权限" value={approvalMode} disabled={busy}
+        onChange={(event) => setApprovalMode(normalizeApprovalMode(event.target.value))}>
+        <option value="allow_all">全部允许</option>
+        <option value="user_approval">用户审批</option>
+      </select>
+    </label>
     <form className="agent-debug-form" onSubmit={(event) => { event.preventDefault(); void send(); }}>
       <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => submitChatOnEnter(event, () => void send())} placeholder="输入调试消息…" rows={3}/>
       {busy ? <button type="button" onClick={() => active.current?.abort('debug-stop')}>停止调试</button>
         : <button type="submit" disabled={!draft.trim() || !config.model_config_id}>发送调试消息</button>}
     </form>
+    {workspaceError && <div role="alert" className="plugin-message error">{workspaceError}</div>}
+    <WorkspacePicker sessionId="" disabled={busy} onChoice={reportWorkspaceChoice} onError={reportWorkspaceError}/>
   </section>;
 }

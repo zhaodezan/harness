@@ -1,4 +1,5 @@
 import json
+import sys
 
 import httpx
 import pytest
@@ -27,13 +28,25 @@ def test_chat_trace_reports_tool_and_terminal_status(tmp_path, scope, fails):
 
     app = create_app(tmp_path / 'db.sqlite', data_dir=tmp_path / 'data', secret_store=Secrets(), http_transport=httpx.MockTransport(provider))
     manager = app.state.local_tool_manager
-    manager.windows_executor = None
+    calls = []
+    tool_output = f'private-tool-result{chr(0x2028)}第二行{chr(0x2029)}第三行'
 
-    async def sandbox(*args, **kwargs):
+    async def execute(backend, source, arguments, *, function_name, **kwargs):
+        calls.append((backend, arguments, function_name))
         if fails:
             raise RuntimeError('private-tool-error')
-        return 'private-tool-result'
+        return tool_output
 
+    class FakeWindowsExecutor:
+        available = True
+
+        async def execute(self, source, arguments, *, function_name, cwd):
+            return await execute('windows', source, arguments, function_name=function_name)
+
+    async def sandbox(source, arguments, *, function_name):
+        return await execute('sandbox', source, arguments, function_name=function_name)
+
+    manager.windows_executor = FakeWindowsExecutor()
     manager.sandbox_executor = sandbox
     source = 'def example(value: str) -> str:\n    """Example."""\n    return value\n'
     with TestClient(app) as client:
@@ -50,20 +63,63 @@ def test_chat_trace_reports_tool_and_terminal_status(tmp_path, scope, fails):
                 'content': 'test', 'model_config_id': agent['model_config_id'], 'capabilities': {'local_tools': [tool['id']]},
             })
         assert response.status_code == 200
+        assert calls == [('windows' if sys.platform == 'win32' else 'sandbox', {'value': 'private-tool-argument'}, 'example')]
         events = traces(response)
         types = [event.get('event_type') for event in events]
         assert types.index('run_started') < types.index('tool_started') < types.index('tool_completed')
-        assert next(event for event in events if event['event_type'] == 'tool_completed')['status'] == ('failed' if fails else 'completed')
+        completed = next(event for event in events if event['event_type'] == 'tool_completed')
+        assert completed['status'] == ('failed' if fails else 'completed')
         assert types[-1] == ('model_error' if fails else 'run_completed')
-        assert 'private-' not in str(events)
+        details = completed['tool_details']
+        assert details['tool_name'] == 'example'
+        assert json.loads(details['input']['text']) == {'value': 'private-tool-argument'}
+        assert details['input']['truncated'] is False
+        if fails:
+            assert '工具执行失败' in details['error']['text']
+            assert 'output' not in details
+        else:
+            assert details['output'] == {'text': tool_output, 'truncated': False}
+            # JavaScript treats these characters as line endings when extracting SSE data with a regex.
+            assert chr(0x2028) not in response.text and chr(0x2029) not in response.text
+            assert 'error' not in details
+        assert 'private-tool-error' not in str(events)
+        assert 'private-provider-detail' not in str(events)
+        assert all('private-' not in event['summary'] for event in events)
         if scope == 'debug':
             assert client.get('/api/logs').json() == []
         else:
             history = client.get('/api/logs', params={'session_id': session['id']}).json()
             assert {'tool_started', 'tool_completed', types[-1]} <= {event['event_type'] for event in history}
+            assert next(event for event in history if event['id'] == completed['id'])['event_type'] == 'tool_completed'
+            assert 'private-' not in str(history)
+            assert all('tool_details' not in event for event in history)
             assert {event['session_id'] for event in history} == {session['id']}
             other = client.post('/api/sessions', json={}).json()
             assert client.get('/api/logs', params={'session_id': other['id']}).json() == []
+
+
+def test_tool_trace_previews_redact_credentials_and_bound_long_results():
+    from backend.app.runtime.tool_trace import tool_trace_details
+
+    details = tool_trace_details('example', {'nested': [{'API-Key': 'private-key', 'name': 'visible'}]}, {
+        'result': {'accessToken': 'private-token', 'body': '长' * 5000},
+    })
+    assert json.loads(details['input']['text']) == {'nested': [{'API-Key': '[REDACTED]', 'name': 'visible'}]}
+    assert details['output']['truncated'] is True
+    assert len(details['output']['text']) == 4000
+    assert 'private-' not in str(details)
+    assert '[REDACTED]' in details['output']['text']
+
+
+def test_tool_trace_previews_mask_credentials_in_tabular_results():
+    from backend.app.runtime.tool_trace import tool_trace_details
+
+    details = tool_trace_details('query', {'passphrase': 'private-input'}, {'result': {
+        'columns': ['name', 'password', 'private_key'],
+        'rows': [['visible', 'private-password', 'private-key']],
+    }})
+    assert json.loads(details['input']['text']) == {'passphrase': '[REDACTED]'}
+    assert json.loads(details['output']['text'])['rows'] == [['visible', '[REDACTED]', '[REDACTED]']]
 
 
 @pytest.mark.parametrize('published', [False, True])

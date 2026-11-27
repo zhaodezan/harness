@@ -13,6 +13,16 @@ test('saved terminal runs replace live copies without mixing sessions', () => {
   assert.deepEqual(mergeRunTraces('other', [], { sessionId: 'current', events: [start, live] }), []);
 });
 
+test('saved summaries keep only the in-memory previews matching their event IDs', () => {
+  const tool = { ...event('one', 'tool_completed', 'completed'), id: 3 };
+  const otherTool = { ...tool, id: 4 };
+  const finished = event('one', 'run_completed', 'completed');
+  const details = { tool_name: 'example', input: { text: '{"value":2}', truncated: false } };
+  const live = { sessionId: 'current', events: [{ ...otherTool, tool_details: details }] };
+  assert.deepEqual(mergeRunTraces('current', [tool, otherTool, finished], live), [tool, { ...otherTool, tool_details: details }, finished]);
+  assert.deepEqual(mergeRunTraces('current', [tool, otherTool, finished], null), [tool, otherTool, finished]);
+});
+
 test('a partial history read cannot replace a local stop or live events', () => {
   const start = event('one', 'run_started');
   const stopped = event('one', 'run_cancelled', 'cancelled');

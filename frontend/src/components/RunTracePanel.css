@@ -6,7 +6,19 @@
 .trace-panel .trace-count { color: #616c63; font-size: 11px; }
 .trace-body { max-height: min(220px, 30vh); overflow: auto; }
 .trace-body .trace-list { max-height: none; overflow: visible; }
-.trace-body .trace-list li { font-size: 11px; }
+.trace-body .trace-list li { display: block; font-size: 11px; }
+.trace-event-row { display: flex; align-items: center; gap: 8px; min-height: 24px; }
+.trace-entry > summary { cursor: pointer; list-style: none; }
+.trace-entry > summary::-webkit-details-marker { display: none; }
+.trace-entry-chevron { width: 1em; text-align: center; flex-shrink: 0; }
+.trace-entry-chevron::before { content: '+'; }
+.trace-entry[open] > summary .trace-entry-chevron::before { content: '−'; }
+.trace-body:has(.trace-entry[open]) { max-height: min(420px, 50vh); }
+.trace-event-details { margin: 0 0 6px 13px; padding: 8px; border-radius: 6px; background: #f7f9f7; color: #303a32; }
+.trace-event-details dt { font-weight: 600; }
+.trace-event-details dd { margin: 2px 0 8px; overflow-wrap: anywhere; }
+.trace-event-details dd:last-child { margin-bottom: 0; }
+.trace-event-details pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: inherit; }
 .trace-body .trace-list li span { min-width: 0; overflow-wrap: anywhere; }
 .trace-body .trace-list li small { flex-shrink: 0; color: #616c63; font-size: 10px; }
 .trace-placeholder { padding: 6px 10px; margin: 0; color: #616c63; font-size: 11px; }

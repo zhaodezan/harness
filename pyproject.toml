@@ -21,7 +21,6 @@ dependencies = [
   "sqlglot>=28,<29",
   "croniter>=6,<7",
   "tzdata>=2025.1",
-  "cubesandbox==0.8.0",
 ]
 
 [project.optional-dependencies]

@@ -90,9 +90,17 @@ class AgentCreate(BaseModel):
     selected_database_connections: list[str] = Field(default_factory=list, max_length=100)
     selected_agents: list[str] = Field(default_factory=list, max_length=20)
     sandbox_code_enabled: bool = False
+    max_rounds: int = Field(default=500, strict=True, ge=-1, le=10000)
     prompt_variables: dict[str, str] = Field(default_factory=dict, max_length=50)
     input_rate_per_million: float | None = Field(default=None, ge=0, le=1_000_000)
     output_rate_per_million: float | None = Field(default=None, ge=0, le=1_000_000)
+
+    @field_validator("max_rounds")
+    @classmethod
+    def valid_max_rounds(cls, value: int) -> int:
+        if value != -1 and not 1 <= value <= 10000:
+            raise ValueError("最大轮次必须为 -1 或 1 到 10000 的整数")
+        return value
 
     @field_validator("name")
     @classmethod
@@ -117,9 +125,17 @@ class AgentPatch(BaseModel):
     selected_database_connections: list[str] | None = Field(default=None, max_length=100)
     selected_agents: list[str] | None = Field(default=None, max_length=20)
     sandbox_code_enabled: bool | None = None
+    max_rounds: int | None = Field(default=None, strict=True, ge=-1, le=10000)
     prompt_variables: dict[str, str] | None = Field(default=None, max_length=50)
     input_rate_per_million: float | None = Field(default=None, ge=0, le=1_000_000)
     output_rate_per_million: float | None = Field(default=None, ge=0, le=1_000_000)
+
+    @field_validator("max_rounds")
+    @classmethod
+    def valid_patch_max_rounds(cls, value: int | None) -> int | None:
+        if value is not None and value != -1 and not 1 <= value <= 10000:
+            raise ValueError("最大轮次必须为 -1 或 1 到 10000 的整数")
+        return value
 
     @field_validator("name")
     @classmethod
@@ -150,6 +166,7 @@ class AgentResponse(BaseModel):
     selected_database_connections: list[str] = Field(default_factory=list)
     selected_agents: list[str] = Field(default_factory=list)
     sandbox_code_enabled: bool = False
+    max_rounds: int = 500
     prompt_variables: dict[str, str]
     input_rate_per_million: float | None = None
     output_rate_per_million: float | None = None

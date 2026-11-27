@@ -4,7 +4,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 26
 
 
 def connect_database(database_path: str | Path) -> sqlite3.Connection:
@@ -491,6 +491,29 @@ def initialize_database(database_path: str | Path) -> None:
 
         if 23 not in applied:
             _allow_workspace_sessions(connection)
+
+        if 24 not in applied:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("ALTER TABLE mcp_servers ADD COLUMN auto_connect INTEGER NOT NULL DEFAULT 0 CHECK (auto_connect IN (0, 1))")
+            connection.execute("INSERT INTO schema_migrations(version) VALUES (24)")
+            connection.commit()
+
+        if 25 not in applied:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("SELECT 1 FROM schema_migrations WHERE version=25").fetchone() is None:
+                connection.execute("CREATE TABLE workspace_groups (id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL UNIQUE)")
+                connection.execute("ALTER TABLE sessions ADD COLUMN workspace_group_id TEXT REFERENCES workspace_groups(id) ON DELETE SET NULL")
+                connection.execute("ALTER TABLE sessions ADD COLUMN default_workspace TEXT")
+                connection.execute("ALTER TABLE sessions ADD COLUMN execution_mode TEXT CHECK (execution_mode IN ('local', 'sandbox'))")
+                connection.execute("INSERT INTO schema_migrations(version) VALUES (25)")
+            connection.commit()
+
+        if 26 not in applied:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("SELECT 1 FROM schema_migrations WHERE version=26").fetchone() is None:
+                connection.execute("ALTER TABLE agents ADD COLUMN max_rounds INTEGER NOT NULL DEFAULT 500 CHECK (max_rounds = -1 OR max_rounds BETWEEN 1 AND 10000)")
+                connection.execute("INSERT INTO schema_migrations(version) VALUES (26)")
+            connection.commit()
 
 
 def _allow_workspace_sessions(connection: sqlite3.Connection) -> None:

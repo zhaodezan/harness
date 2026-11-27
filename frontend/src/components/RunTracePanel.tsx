@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { traceSummary } from '../runTrace';
-import type { RunTrace } from '../runTrace';
+import type { RunTrace, TracePreview } from '../runTrace';
 import './RunTracePanel.css';
 
 const statusLabels: Record<string, string> = {
@@ -17,6 +17,13 @@ type Props = {
   children?: ReactNode;
 };
 
+function PreviewField({ label, preview }: { label: string; preview: TracePreview }) {
+  return <>
+    <dt>{label}</dt>
+    <dd><pre>{preview.text || '（空）'}</pre>{preview.truncated && <span>内容过长，已截断</span>}</dd>
+  </>;
+}
+
 export function RunTracePanel({ events, loading, error, onRetry, children }: Props) {
   const latest = events.at(-1);
   return <details className="trace-panel" aria-label="运行轨迹">
@@ -30,10 +37,24 @@ export function RunTracePanel({ events, loading, error, onRetry, children }: Pro
       {error && <div className="trace-placeholder" role="status">无法加载历史轨迹。 <button type="button" onClick={onRetry}>重试</button></div>}
       {!loading && !error && !events.length && !children && <p className="trace-placeholder">暂无运行事件。</p>}
       {children}
-      {events.length > 0 && <ol className="trace-list">{events.map((item, index) => <li key={index}>
-        <i className={['failed', 'rejected', 'warning'].includes(item.status) ? 'failed' : ''} aria-hidden="true"/>
-        <span>{traceSummary(item)}</span><small>{statusLabels[item.status] ?? item.status}</small>
-      </li>)}</ol>}
+      {events.length > 0 && <ol className="trace-list">{events.map((item, index) => {
+        const details = item.tool_details;
+        const row = <>
+          <i className={['failed', 'rejected', 'warning'].includes(item.status) ? 'failed' : ''} aria-hidden="true"/>
+          <span>{traceSummary(item)}</span><small>{statusLabels[item.status] ?? item.status}</small>
+        </>;
+        return <li key={item.id == null ? `local-${index}` : `event-${item.id}`}>
+          {details ? <details className="trace-entry">
+            <summary className="trace-event-row">{row}<span className="trace-entry-chevron" aria-hidden="true"/></summary>
+            <dl className="trace-event-details">
+              <dt>工具名</dt><dd><code>{details.tool_name}</code></dd>
+              <PreviewField label="输入" preview={details.input}/>
+              {details.output && <PreviewField label="输出" preview={details.output}/>}
+              {details.error && <PreviewField label="错误" preview={details.error}/>}
+            </dl>
+          </details> : <div className="trace-event-row">{row}</div>}
+        </li>;
+      })}</ol>}
     </div>
   </details>;
 }

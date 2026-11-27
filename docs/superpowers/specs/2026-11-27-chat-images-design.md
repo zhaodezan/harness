@@ -1,0 +1,5 @@
+# Inline chat images
+
+When a successful local Skill CLI returns a JSON `delivery` list with `preview_path` and optional `image_name`, copy supported image files inside the selected conversation workspace into a private application image store. Return opaque, same-origin image URLs only; do not interpret Markdown, user text, model text, other tools' output, or remote URLs as file registration requests. Bound file and per-reply size; serve only raster formats with explicit content types and no sniffing.
+
+Associate each image with the assistant reply as soon as the tool completes; a normal reply's attachments survive reload and can be inherited with earlier messages in a branch. Debug replies use expiring image URLs and are not saved to chat history. Both views render the images with an optional label and a link to open the full image. If an image is unavailable, the rest of the reply stays visible. Do not change the installed Skill. Binary images are local attachments, not part of portable JSON backups; omit their references on export and discard any provided on import.

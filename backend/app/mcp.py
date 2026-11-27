@@ -43,7 +43,6 @@ class MCPManager:
             await self._open_sse_stream(state)
         elif transport != "streamable_http":
             raise MCPError("不支持的 MCP 传输方式")
-        self.servers[server_id] = state
         try:
             await self._request(state, "initialize", {
                 "protocolVersion": "2025-03-26",
@@ -55,9 +54,10 @@ class MCPManager:
             tools = result.get("tools", [])
             state["tools"] = tools
             state["status"] = "connected"
+            self.servers[server_id] = state
             return tools
-        except Exception:
-            await self.disconnect(server_id)
+        except (Exception, asyncio.CancelledError):
+            await self._close_state(state)
             raise
 
     async def _open_sse_stream(self, state: dict[str, Any]) -> None:
@@ -83,16 +83,41 @@ class MCPManager:
 
     async def disconnect(self, server_id: str) -> None:
         state = self.servers.pop(server_id, None)
-        if not state:
-            return
+        if state:
+            await self._close_state(state)
+
+    @staticmethod
+    async def _close_state(state: dict[str, Any]) -> None:
         process = state.get("process")
-        if process and process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=3)
-            except asyncio.TimeoutError:
-                process.kill()
+        if process is None:
+            return
+        if process.stdin is not None:
+            process.stdin.close()
+        try:
+            if process.returncode is None:
+                process.terminate()
+        except ProcessLookupError:
+            pass
+        async def drain_and_wait():
+            # An in-flight tool call may already own the stdout reader.
+            async with state["lock"]:
+                if process.stdout is not None:
+                    while await process.stdout.read(8192):
+                        pass
                 await process.wait()
+
+        try:
+            await asyncio.wait_for(drain_and_wait(), timeout=3)
+        except TimeoutError:
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            try:
+                await asyncio.wait_for(drain_and_wait(), timeout=1)
+            except TimeoutError:
+                pass
 
     async def close(self) -> None:
         for server_id in list(self.servers):

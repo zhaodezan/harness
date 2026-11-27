@@ -1,3 +1,6 @@
+import asyncio
+import json
+
 import pytest
 import httpx
 from fastapi.testclient import TestClient
@@ -97,3 +100,85 @@ def test_sse_mcp_server_uses_endpoint_for_json_rpc(tmp_path):
     assert [str(request.url) for request in seen if request.method == "POST"] == [
         "https://example.test/messages", "https://example.test/messages", "https://example.test/messages",
     ]
+
+
+def test_restart_restores_confirmed_mcp_and_leaves_unconfirmed_alone(tmp_path):
+    seen = []
+    secrets = MemorySecrets()
+
+    async def transport(request):
+        body = json.loads(await request.aread())
+        seen.append((request.url.host, body['method'], request.headers.get('authorization')))
+        if body['method'] == 'notifications/initialized':
+            return httpx.Response(202)
+        results = {'initialize': {}, 'tools/list': {'tools': [{'name': 'lookup'}]},
+                   'tools/call': {'content': [{'type': 'text', 'text': 'ok'}]}}
+        return httpx.Response(200, json={'jsonrpc': '2.0', 'id': body['id'], 'result': results[body['method']]})
+
+    def app():
+        return create_app(tmp_path / 'mcp.sqlite3', data_dir=tmp_path / 'data',
+                          http_transport=httpx.MockTransport(transport), secret_store=secrets)
+
+    with TestClient(app()) as client:
+        for name in ('confirmed', 'unconfirmed'):
+            created = client.post('/api/mcp/servers', json={'name': name, 'transport': 'http',
+                                  'url': f'https://{name}.test/mcp', 'bearer_token': 'test-token'})
+            assert created.status_code == 201
+            if name == 'confirmed':
+                server = created.json()['id']
+        assert client.post(f'/api/mcp/servers/{server}/connect', json={'confirmed': True}).status_code == 200
+    seen.clear()
+    restarted = app()
+    with TestClient(restarted) as client:
+        confirmed, unconfirmed = client.get('/api/mcp/servers').json()
+        assert confirmed['connected'] and confirmed['auto_connect']
+        assert not unconfirmed['connected'] and not unconfirmed['auto_connect']
+        assert all(host == 'confirmed.test' and token == 'Bearer test-token' for host, _, token in seen)
+        assert client.get(f'/api/mcp/servers/{server}/tools').json()[0]['id'] == f'mcp:{server}:lookup'
+        assert restarted.state.tool_registry.get_definition('confirmed/lookup') is not None
+        result = client.portal.call(restarted.state.mcp_manager.call_tool, server, 'lookup', {})
+        assert result['content'][0]['text'] == 'ok'
+        assert client.post(f'/api/mcp/servers/{server}/disconnect').status_code == 200
+    seen.clear()
+    with TestClient(app()) as client:
+        assert not any(s['connected'] or s['auto_connect'] for s in client.get('/api/mcp/servers').json())
+        assert seen == []
+
+
+def test_failed_restore_does_not_block_startup_or_publish_partial_tools(tmp_path, monkeypatch):
+    mode = 'ok'
+
+    async def transport(request):
+        body = json.loads(await request.aread())
+        if body['method'] == 'notifications/initialized':
+            return httpx.Response(202)
+        tools = [{'name': 'lookup'}]
+        if mode == 'failed' and request.url.host == 'conflict.test':
+            tools.append({'name': 'lookup'})
+        if mode == 'failed' and request.url.host == 'slow.test':
+            await asyncio.Event().wait()
+        return httpx.Response(200, json={'jsonrpc': '2.0', 'id': body['id'], 'result': {'tools': tools}})
+
+    def app():
+        return create_app(tmp_path / 'mcp.sqlite3', data_dir=tmp_path / 'data',
+                          http_transport=httpx.MockTransport(transport), secret_store=MemorySecrets())
+
+    with TestClient(app()) as client:
+        for name in ('good', 'conflict', 'slow'):
+            server = client.post('/api/mcp/servers', json={'name': name, 'transport': 'http',
+                                 'url': f'https://{name}.test/mcp'}).json()['id']
+            assert client.post(f'/api/mcp/servers/{server}/connect', json={'confirmed': True}).status_code == 200
+    mode = 'failed'
+    monkeypatch.setattr('backend.app.mcp_connections.STARTUP_TIMEOUT', 0.6)
+    restarted = app()
+    with TestClient(restarted) as client:
+        assert client.get('/api/health').status_code == 200
+        servers = {item['name']: item for item in client.get('/api/mcp/servers').json()}
+        assert servers['good']['connected']
+        for name in ('conflict', 'slow'):
+            item = servers[name]
+            assert not item['connected'] and item['auto_connect'] and item['connection_error']
+            assert restarted.state.tool_registry.get_definition(f'{name}/lookup') is None
+            assert item['id'] not in restarted.state.mcp_manager.servers
+            assert client.post(f"/api/mcp/servers/{item['id']}/disconnect").status_code == 200
+        assert [item['name'] for item in client.get('/api/mcp/servers').json() if item['auto_connect']] == ['good']

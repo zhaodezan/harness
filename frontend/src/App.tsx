@@ -1,4 +1,4 @@
-import { ChangeEvent, FormEvent, useEffect, useRef, useState } from 'react';
+import { ChangeEvent, FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import { Link, matchPath, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { parseEnvironmentLines } from './environment';
@@ -6,9 +6,11 @@ import { api } from './api';
 import { submitChatOnEnter } from './chatKeyboard';
 import { createTypewriter } from './typewriter';
 import { RunTracePanel } from './components/RunTracePanel';
+import { ChatImages } from './components/ChatImages';
+import type { ChatImage } from './components/ChatImages';
 import { groupRunTraces, isTerminalTrace, mergeRunTraces } from './runTrace';
 import type { RunTrace, SessionTrace } from './runTrace';
-import { ChatCapabilitiesPicker, ChatModelPicker, chatRequestOptions, defaultCapabilities } from './ChatComposerOptions';
+import { ApprovalModePicker, ChatCapabilitiesPicker, ChatModelPicker, DEFAULT_APPROVAL_MODE, chatRequestOptions, defaultCapabilities, normalizeApprovalMode } from './ChatComposerOptions';
 import type { ChatOptions, ChatPreference, ModelOption } from './ChatComposerOptions';
 import { AgentListPage } from './pages/AgentListPage';
 import { AgentConfigPage } from './pages/AgentConfigPage';
@@ -16,15 +18,17 @@ import { PluginLibraryPage } from './pages/PluginLibraryPage';
 import { KnowledgeBasePage } from './pages/KnowledgeBasePage';
 import { DatabasePage } from './pages/DatabasePage';
 import { ScheduledTasksPage } from './pages/ScheduledTasksPage';
+import { WorkspacePicker } from './components/WorkspacePicker';
+import type { WorkspaceChoice } from './components/WorkspacePicker';
 
-type Agent = { id: string; name: string; model: string; model_config_name?: string; mode: string; base_url?: string; system_prompt?: string; context_window?: number; skill_directory?: string; selected_skills?: string[]; prompt_variables?: Record<string, string>; input_rate_per_million?: number | null; output_rate_per_million?: number | null };
+type Agent = { id: string; name: string; model: string; model_config_name?: string; mode: string; base_url?: string; system_prompt?: string; context_window?: number; max_rounds?: number; skill_directory?: string; selected_skills?: string[]; prompt_variables?: Record<string, string>; input_rate_per_million?: number | null; output_rate_per_million?: number | null };
 type PromptVersion = { id: string; content: string; created_at: string };
 type Session = { id: string; agent_id: string | null; title: string };
-type Message = { id: string; role: string; content: string; run_id?: string; plan?: string };
+type Message = { id: string; role: string; content: string; run_id?: string; plan?: string; images?: ChatImage[] };
 type SearchHit = { session_id: string; agent_id: string | null; title: string; matched_message: string | null };
 type Draft = { text: string; branchMessageId: string };
 type Memory = { id: string; content: string; scope: string; agent_id: string | null };
-type PendingApproval = { approval_id: string; tool_name: string; description: string; arguments: Record<string, unknown> };
+type PendingApproval = { approval_id: string; tool_name: string; description: string; arguments: Record<string, unknown>; execution_mode?: 'local' | 'sandbox'; working_directory?: string };
 type LogEvent = { id: number; occurred_at: string; run_id: string; session_id: string | null; level: string; subsystem: string; event_type: string; status: string; duration_ms: number | null; summary: string; input_tokens: number | null; output_tokens: number | null; estimated_cost: number | null; cost_currency: string | null };
 type ContextSummary = { id: string; run_id: string; summary: string; summarized_message_count: number; created_at: string };
 type MCPTool = { name: string; description: string; risk: string };
@@ -97,6 +101,8 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
   const sessionListRequest = useRef(0);
   const preparedSession = useRef('');
   const [loadedHistoryId, setLoadedHistoryId] = useState('');
+  const [historyError, setHistoryError] = useState('');
+  const [historyRetry, setHistoryRetry] = useState(0);
   const [messages, setMessages] = useState<Message[]>([]);
   const [contextSummaries, setContextSummaries] = useState<ContextSummary[]>([]);
   const [liveTrace, setLiveTrace] = useState<SessionTrace | null>(null);
@@ -119,6 +125,7 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
   const setDraft = (text: string) => updateDraft({ text });
   const setBranchMessageId = (id: string) => updateDraft({ branchMessageId: id });
   const preference = composerByChat[composerKey];
+  const approvalMode = normalizeApprovalMode(preference?.approval_mode ?? DEFAULT_APPROVAL_MODE);
   const chatCatalog = catalogState?.data;
   const capabilitySelection = preference?.capabilities ?? (chatCatalog && defaultCapabilities(chatCatalog));
   const updateComposer = (change: ChatPreference) => {
@@ -132,6 +139,14 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
   const activeController = useRef<AbortController | null>(null);
   const [creatingSession, setCreatingSession] = useState(false);
   const [error, setError] = useState('');
+  const [workspaceChoice, setWorkspaceChoice] = useState<WorkspaceChoice>({ group_id: null, execution_mode: 'local' });
+  const workspaceEpoch = useRef({ sessionId, value: 0 });
+  if (workspaceEpoch.current.sessionId !== sessionId) workspaceEpoch.current = { sessionId, value: workspaceEpoch.current.value + 1 };
+  const epoch = workspaceEpoch.current.value;
+  const [workspaceStatus, setWorkspaceStatus] = useState<{ sessionId: string; ready: boolean; epoch: number }>({ sessionId: '', ready: true, epoch: 0 });
+  const reportWorkspaceChoice = useCallback((choice: WorkspaceChoice) => setWorkspaceChoice(choice), []);
+  const reportWorkspaceReady = useCallback((id: string, ready: boolean) => setWorkspaceStatus({ sessionId: id, ready, epoch }), [epoch]);
+  const reportWorkspaceError = useCallback((message: string) => setError(message), []);
   const [showSettings, setShowSettings] = useState(false);
   const [setupStep, setSetupStep] = useState(1);
   const [editingAgentId, setEditingAgentId] = useState('');
@@ -342,17 +357,18 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
   }, [canChat, sessionScope, sessionSearch]);
   useEffect(() => {
     setContextSummaries([]);
+    setHistoryError('');
     if (!canChat || !sessionId) { setMessages([]); setLoadedHistoryId(''); return; }
     const controller = new AbortController();
     if (preparedSession.current === sessionId) preparedSession.current = '';
     else api<Message[]>(`/sessions/${sessionId}/messages`, { signal: controller.signal })
       .then((items) => { if (!controller.signal.aborted) { setMessages(items); setLoadedHistoryId(sessionId); } })
-      .catch((e: Error) => { if (!controller.signal.aborted) setError(e.message); });
+      .catch((e: Error) => { if (!controller.signal.aborted) { setHistoryError(e.message); setError(e.message); } });
     api<ContextSummary[]>(`/sessions/${sessionId}/summaries`, { signal: controller.signal })
       .then((items) => { if (!controller.signal.aborted) setContextSummaries(items); })
       .catch((e: Error) => { if (!controller.signal.aborted) setError(e.message); });
     return () => controller.abort();
-  }, [canChat, sessionId]);
+  }, [canChat, sessionId, historyRetry]);
   useEffect(() => {
     if (!canChat || !isChatPage || !sessionId) return;
     const controller = new AbortController();
@@ -474,8 +490,9 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
   };
 
   const historyLoading = !!sessionId && loadedHistoryId !== sessionId;
-  const createSession = (signal?: AbortSignal) => api<Session>('/sessions', {
-    method: 'POST', body: JSON.stringify({ agent_id: agentId ?? null }), signal,
+  const workspaceReady = !sessionId || (workspaceStatus.sessionId === sessionId && workspaceStatus.epoch === epoch && workspaceStatus.ready);
+  const createSession = (signal?: AbortSignal, workspace: WorkspaceChoice = workspaceChoice) => api<Session>('/sessions', {
+    method: 'POST', body: JSON.stringify({ agent_id: agentId ?? null, workspace }), signal,
   });
   const attachSession = (session: Session, history: Message[]) => {
     ++sessionListRequest.current;
@@ -490,7 +507,7 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
     if (!canChat || busy || creatingSession) return;
     setCreatingSession(true);
     try {
-      const session = await createSession();
+      const session = await createSession(undefined, workspaceReady ? workspaceChoice : { group_id: null, execution_mode: 'local' });
       if (!mounted.current) return;
       attachSession(session, []);
       setError('');
@@ -500,13 +517,13 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
   };
 
   const send = async () => {
-    if (!draft.trim() || activeController.current || creatingSession || historyLoading || !canChat) return;
+    if (!draft.trim() || activeController.current || creatingSession || historyLoading || !workspaceReady || !canChat) return;
     if (!agentId && !preference?.model) { setError('请先为工作区对话选择模型。'); return; }
     if (!capabilitySelection) {
       setError(catalogState?.error ? '无法加载对话工具，请通过「＋」重试。' : '正在加载对话工具，请稍后发送。');
       return;
     }
-    const sendOptions = chatRequestOptions(capabilitySelection, preference?.model);
+    const sendOptions = chatRequestOptions(capabilitySelection, preference?.model, approvalMode);
     const text = draft.trim();
     let currentSession = sessionId;
     let activeRunId = '';
@@ -584,7 +601,8 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
             }
             terminalReceived ||= isTerminalTrace(item);
             appendTrace({ ...item, run_id: activeRunId || assistantMessageId });
-          } else if (type === 'done') terminalReceived = true;
+          } else if (type === 'images') updateReply({ images: JSON.parse(data).images as ChatImage[] });
+          else if (type === 'done') terminalReceived = true;
           else if (type === 'plan') updateReply({ plan: JSON.parse(data).plan as string });
           else if (type === 'approval_required') setPendingApproval(JSON.parse(data) as PendingApproval);
           else if (type === 'error') throw new Error(JSON.parse(data).message);
@@ -632,7 +650,7 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
     <Link to="/chat">返回工作区对话</Link>
   </section> : <>
       <header className="topbar"><div className="breadcrumb">{activeAgent ? <><span>Agent 专属对话</span> <span>/</span> <strong>{activeAgent.name}</strong></> : <strong>工作区对话</strong>}</div><div className="top-actions"><span className="local-indicator"><i /> 本地运行</span>{!agentId && <button className="icon-button" aria-label="打开模型库" onClick={() => navigate('/plugins?tab=Model')}>⚙</button>}</div></header>
-      {historyLoading ? <div className="app-page-loading" role="status">{error ? '无法加载对话历史' : '正在加载对话历史…'}</div> : !messages.length ? <section className="welcome"><div className="welcome-orb"><div className="orb-inner">✳</div><span className="orb-ring ring-one"/><span className="orb-ring ring-two"/></div><div className="eyebrow"><span /> {activeAgent ? 'AGENT CHAT' : 'YOUR PRIVATE AI WORKSPACE'}</div>{activeAgent ? <><h1>你好，我是<em>{activeAgent.name}</em></h1><p className="welcome-copy">在这里开启与此 Agent 的专属对话。<br/>本地对话历史独立保存。</p></> : <><h1>好想法，<em>从这里开始。</em></h1><p className="welcome-copy">一个安静、专注的空间，让想法自然生长。<br/>你的对话与数据，始终留在本地。</p></>}<div className="suggestions"><button onClick={() => setDraft('帮我梳理一个新项目的想法')}><span>✦</span> 梳理一个新想法 <b>↗</b></button><button onClick={() => setDraft('帮我总结今天的工作重点')}><span>◷</span> 整理工作重点 <b>↗</b></button><button onClick={() => setDraft('为我制定一个清晰的行动计划')}><span>⌁</span> 制定行动计划 <b>↗</b></button></div></section> : <section className="conversation">
+      {historyLoading ? <div className="app-page-loading" role="status">{historyError ? <>无法加载对话历史 <button type="button" onClick={() => { setHistoryError(''); setHistoryRetry((n) => n + 1); }}>重试加载历史</button></> : '正在加载对话历史…'}</div> : !messages.length ? <section className="welcome"><div className="welcome-orb"><div className="orb-inner">✳</div><span className="orb-ring ring-one"/><span className="orb-ring ring-two"/></div><div className="eyebrow"><span /> {activeAgent ? 'AGENT CHAT' : 'YOUR PRIVATE AI WORKSPACE'}</div>{activeAgent ? <><h1>你好，我是<em>{activeAgent.name}</em></h1><p className="welcome-copy">在这里开启与此 Agent 的专属对话。<br/>本地对话历史独立保存。</p></> : <><h1>好想法，<em>从这里开始。</em></h1><p className="welcome-copy">一个安静、专注的空间，让想法自然生长。<br/>你的对话与数据，始终留在本地。</p></>}<div className="suggestions"><button onClick={() => setDraft('帮我梳理一个新项目的想法')}><span>✦</span> 梳理一个新想法 <b>↗</b></button><button onClick={() => setDraft('帮我总结今天的工作重点')}><span>◷</span> 整理工作重点 <b>↗</b></button><button onClick={() => setDraft('为我制定一个清晰的行动计划')}><span>⌁</span> 制定行动计划 <b>↗</b></button></div></section> : <section className="conversation">
         {contextSummaries.length > 0 && <details className="context-summary"><summary>上下文整理记录（{contextSummaries.length}）</summary>{contextSummaries.map((summary) => <article key={summary.id}><small>{new Date(summary.created_at).toLocaleString()} · 整理了 {summary.summarized_message_count} 条历史消息</small><p>{summary.summary}</p></article>)}</details>}
         <div className="message-list">{messages.map((message, index) => {
           const assistant = message.role === 'assistant';
@@ -645,6 +663,7 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
                 {message.plan && <div className="plan-card"><div className="plan-heading"><span>◇</span><strong>执行计划</strong></div><pre>{message.plan}</pre></div>}
               </RunTracePanel>}
               <div className="message-content">{message.content || (busy && index === messages.length - 1 ? <span className="typing"><i/><i/><i/></span> : '')}</div>
+              {assistant && <ChatImages images={message.images}/>}
               {message.role === 'user' && !busy && <button className="branch-message" type="button" onClick={() => { setBranchMessageId(message.id); setDraft(message.content); }}>编辑并从此处分支 ↗</button>}
               {assistant && !busy && message.content && <button className="branch-message" type="button" onClick={() => {
                 const previousUser = messages.slice(0, index).reverse().find((item) => item.role === 'user');
@@ -665,6 +684,9 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
                 onChange={(capabilities) => updateComposer({ capabilities })} canReset={!!agentId && !!preference?.capabilities && !!chatCatalog}
                 onReset={() => updateComposer({ capabilities: undefined })} loading={!catalogState || catalogState.loading}
                 error={catalogState?.error ?? ''} refresh={() => setCatalogRefresh((n) => n + 1)} disabled={busy || creatingSession}/>
+              <ApprovalModePicker value={approvalMode}
+                onChange={(approval_mode) => updateComposer({ approval_mode })}
+                disabled={busy || creatingSession}/>
               <span className="mode-chip">{activeAgent?.mode === 'plan_execute' ? '◇ 计划执行' : '◉ 灵感对话'}</span>
             </div>
             <div className="send-tools">
@@ -672,10 +694,12 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
               <ChatModelPicker key={composerKey} models={modelState.data} model={preference?.model}
                 defaultName={activeAgent?.model_config_name || activeAgent?.model} onChange={(model) => updateComposer({ model })}
                 loading={modelState.loading} error={modelState.error} refresh={() => setModelRefresh((n) => n + 1)} disabled={busy || creatingSession}/>
-              <button className={`send-button ${busy ? 'stop-button' : ''}`} type={busy ? 'button' : 'submit'} onClick={busy ? () => activeController.current?.abort() : undefined} disabled={!busy && (!draft.trim() || historyLoading || creatingSession)} aria-label={busy ? '停止运行' : '发送'}>{busy ? '■' : '↑'}</button>
+              <button className={`send-button ${busy ? 'stop-button' : ''}`} type={busy ? 'button' : 'submit'} onClick={busy ? () => activeController.current?.abort() : undefined} disabled={!busy && (!draft.trim() || historyLoading || creatingSession || !workspaceReady)} aria-label={busy ? '停止运行' : '发送'}>{busy ? '■' : '↑'}</button>
             </div>
           </div>
         </form>
+        {isChatPage && <WorkspacePicker sessionId={sessionId} disabled={busy || creatingSession}
+          onChoice={reportWorkspaceChoice} onError={reportWorkspaceError} onReady={reportWorkspaceReady}/>}
         <div className="composer-caption">模型输出可能有误，重要信息请自行核实。</div>
       </div>
       <footer className="footer"><span>BUILT FOR THOUGHTFUL WORK</span><span>隐私优先 <i/> 本地存储</span></footer>
@@ -690,9 +714,9 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
       <button className={`nav-item ${isChatPage && !agentId ? 'active' : ''}`} onClick={() => navigate('/chat')}><span className="nav-icon">◉</span> 对话 <span className="nav-count">{!agentId && (sessions.length || '')}</span></button>
       <button className={`nav-item ${location.pathname.startsWith('/plugins') ? 'active' : ''}`} onClick={() => navigate('/plugins?tab=Model')}><span className="nav-icon">▦</span> 模型及插件库</button>
       <button className={`nav-item ${location.pathname === '/databases' ? 'active' : ''}`} onClick={() => navigate('/databases')}><span className="nav-icon">▤</span> 数据库</button>
-      <button className={`nav-item ${location.pathname === '/scheduled-tasks' ? 'active' : ''}`} onClick={() => navigate('/scheduled-tasks')}><span className="nav-icon">◷</span> 定时任务</button>
       <button className={`nav-item ${location.pathname === '/knowledge-bases' ? 'active' : ''}`} onClick={() => navigate('/knowledge-bases')}><span className="nav-icon">▤</span> 知识库</button>
       <button className="nav-item" disabled={!canChat} onClick={() => setShowMemory(true)}><span className="nav-icon">◇</span> 长期记忆</button>
+      <button className={`nav-item ${location.pathname === '/scheduled-tasks' ? 'active' : ''}`} onClick={() => navigate('/scheduled-tasks')}><span className="nav-icon">◷</span> 定时任务</button>
       <button className="nav-item" onClick={() => setShowLogs(true)}><span className="nav-icon">≋</span> 运行记录</button>
       <button className="nav-item" onClick={() => { setDataTransferStatus(''); setImportPreview(null); setShowDataTransfer(true); }}><span className="nav-icon">⇅</span> 备份与恢复</button>
       </>}
@@ -752,7 +776,7 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
       </form></div>}
 
     {showMemory && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowMemory(false); }}><section className="settings-card memory-card"><button type="button" className="modal-close" onClick={() => setShowMemory(false)}>×</button><div className="eyebrow">只属于你的个人知识</div><h2>{activeAgent ? `${activeAgent.name} · 专属记忆` : '全局长期记忆'}</h2><p>确认保存的信息会用于未来对话。你可以随时管理。</p><form onSubmit={saveMemory} className="memory-form"><label>添加一条记忆<input value={memoryDraft} onChange={(event) => setMemoryDraft(event.target.value)} placeholder="例如：我偏好简洁、条理清晰的回答"/></label><button className="primary-button" type="submit">保存记忆 <span>→</span></button></form><div className="memory-toolbar"><input aria-label="搜索记忆" value={memoryQuery} onChange={(event) => setMemoryQuery(event.target.value)} placeholder="搜索已保存的记忆…"/><button type="button" onClick={clearMemories}>清空</button></div><div className="memory-list">{memories.map((memory) => <div className="memory-item" key={memory.id}>{editingMemoryId === memory.id ? <input value={memoryEdit} onChange={(event) => setMemoryEdit(event.target.value)}/> : <span>{memory.content}</span>}<small>{memory.scope === 'global' ? '全局' : '此智能体'}</small>{editingMemoryId === memory.id ? <button type="button" onClick={() => updateMemory(memory.id)}>保存</button> : <button type="button" onClick={() => { setEditingMemoryId(memory.id); setMemoryEdit(memory.content); }}>编辑</button>}<button type="button" onClick={() => deleteMemory(memory.id)}>×</button></div>)}{!memories.length && <div className="empty-sessions">还没有保存的记忆</div>}</div></section></div>}
-    {pendingApproval && <div className="modal-backdrop approval-backdrop"><section className="settings-card approval-card"><div className="eyebrow">需要你的确认</div><h2>允许这个操作吗？</h2><p>{pendingApproval.description}</p><div className="approval-tool">{pendingApproval.tool_name}</div><pre>{JSON.stringify(pendingApproval.arguments, null, 2)}</pre><p className="approval-warning">此工具可能修改数据或联系外部服务。未确认前不会执行。</p><div className="approval-actions"><button type="button" className="secondary-button" onClick={() => decideApproval(false)}>拒绝</button><button type="button" className="primary-button" onClick={() => decideApproval(true)}>批准并继续</button></div></section></div>}
+    {pendingApproval && <div className="modal-backdrop approval-backdrop"><section className="settings-card approval-card"><div className="eyebrow">需要你的确认</div><h2>允许这个操作吗？</h2><p>{pendingApproval.description}</p><div className="approval-tool">{pendingApproval.tool_name}</div><pre>{JSON.stringify(pendingApproval.arguments, null, 2)}</pre>{pendingApproval.execution_mode === 'local' ? <p className="approval-warning">代码将在本机目录运行：{pendingApproval.working_directory}。本机执行不是沙箱；代码可以访问当前系统账号有权访问的资源。请检查完整代码后再批准。</p> : pendingApproval.execution_mode === 'sandbox' ? <p className="approval-warning">代码将在本机 Docker 沙箱执行，不会挂载本机工作目录。</p> : <p className="approval-warning">此工具可能修改数据或联系外部服务。未确认前不会执行。</p>}<div className="approval-actions"><button type="button" className="secondary-button" onClick={() => decideApproval(false)}>拒绝</button><button type="button" className="primary-button" onClick={() => decideApproval(true)}>批准并继续</button></div></section></div>}
     {showMcp && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowMcp(false); }}><section className="settings-card mcp-card"><button type="button" className="modal-close" onClick={() => setShowMcp(false)}>×</button><div className="eyebrow">扩展连接</div><h2>MCP Server</h2><p>连接前展示命令或地址并要求你确认。</p><form onSubmit={createMcpServer} className="mcp-form"><label>显示名称<input value={mcpName} onChange={(event) => setMcpName(event.target.value)} required/></label><label>连接方式<select value={mcpTransport} onChange={(event) => setMcpTransport(event.target.value as MCPTransport)}><option value="stdio">Local（本机程序 / stdio）</option><option value="sse">SSE</option><option value="streamable_http">Streamable HTTP</option></select></label>{mcpTransport === 'stdio' ? <><label>启动命令<input value={mcpCommand} onChange={(event) => setMcpCommand(event.target.value)} required/></label><label>命令参数<input value={mcpArgs} onChange={(event) => setMcpArgs(event.target.value)}/></label><label>工作目录<input value={mcpCwd} onChange={(event) => setMcpCwd(event.target.value)}/></label><label>环境变量（KEY=VALUE，每行一项）<textarea className="prompt-input" value={mcpEnvText} onChange={(event) => setMcpEnvText(event.target.value)} rows={3} placeholder={'SERVICE_TOKEN=…\\nREGION=…'}/></label></> : <><label>服务地址<input type="url" value={mcpUrl} onChange={(event) => setMcpUrl(event.target.value)} required/></label><label>Bearer Token<input type="password" value={mcpBearerToken} onChange={(event) => setMcpBearerToken(event.target.value)} autoComplete="new-password"/></label></>}<button className="primary-button" type="submit">添加连接 <span>＋</span></button></form><div className="mcp-server-list">{mcpServers.map((server) => <article className="mcp-server" key={server.id}><div className="mcp-server-head"><div><strong>{server.name}</strong><small>{server.transport === 'stdio' ? `${server.command} ${server.args.join(' ')}` : server.url}</small></div><span className={server.connected ? 'mcp-status connected' : 'mcp-status'}>{server.connected ? '已连接' : '未连接'}</span></div><div className="mcp-actions">{server.connected ? <button type="button" onClick={() => disconnectMcp(server)}>断开</button> : <button type="button" onClick={() => connectMcp(server)}>连接</button>}<button type="button" onClick={() => deleteMcp(server)}>删除</button></div>{(mcpTools[server.id] ?? []).map((tool) => <div className="mcp-tool" key={tool.name}><span>{tool.name.split('/').pop()}</span><small>{tool.risk === 'read_only' ? '只读 · 直接调用' : '可能修改数据 · 直接调用'}</small></div>)}</article>)}{!mcpServers.length && <div className="empty-sessions">添加一个 MCP Server 来扩展智能体能力</div>}</div></section></div>}
     {showDataTransfer && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowDataTransfer(false); }}><section className="settings-card transfer-card"><button type="button" className="modal-close" onClick={() => setShowDataTransfer(false)}>×</button><div className="eyebrow">本机数据</div><h2>备份与恢复</h2><p>备份不包含 API 密钥和远程 MCP Token；恢复后需重新配置凭据。</p><button className="primary-button" type="button" onClick={() => window.open('/api/data/export', '_blank', 'noopener,noreferrer')}>下载备份 JSON <span>↓</span></button><label className="import-file-label">从备份恢复<input type="file" accept="application/json,.json" onChange={importDataFile}/></label>{importPreview && <div className="import-preview"><strong>导入前预览</strong><small>智能体 {importPreview.agents} · 对话 {importPreview.sessions} · 消息 {importPreview.messages} · 记忆 {importPreview.memories} · MCP {importPreview.mcp_servers}</small>{importPreview.mcp_name_conflicts.length > 0 && <small className="import-warning">MCP 名称冲突将自动添加导入后缀：{importPreview.mcp_name_conflicts.join('、')}</small>}{importPreview.warnings.map((warning) => <small className="import-warning" key={warning}>{warning}</small>)}<div className="import-actions"><button type="button" className="secondary-button" onClick={() => setImportPreview(null)}>取消</button><button type="button" className="primary-button" onClick={confirmImport}>确认导入</button></div></div>}{dataTransferStatus && <div className="transfer-success">{dataTransferStatus}</div>}</section></div>}
     {showLogs && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowLogs(false); }}><section className="settings-card logs-card"><button type="button" className="modal-close" onClick={() => setShowLogs(false)}>×</button><div className="eyebrow">最近 30 天</div><h2>运行记录</h2><p>运行轨迹、耗时和模型返回的 Token 用量。</p><div className="logs-toolbar"><input aria-label="搜索运行记录" value={logQuery} onChange={(event) => setLogQuery(event.target.value)} placeholder="搜索事件、工具或错误…"/><select aria-label="按级别筛选" value={logLevel} onChange={(event) => setLogLevel(event.target.value)}><option value="">所有级别</option><option value="info">信息</option><option value="warning">警告</option><option value="error">错误</option></select><select aria-label="按模块筛选" value={logSubsystem} onChange={(event) => setLogSubsystem(event.target.value)}><option value="">所有模块</option><option value="runtime">运行时</option><option value="mcp">MCP</option></select><input aria-label="开始日期" type="date" value={logSince} onChange={(event) => setLogSince(event.target.value)}/><input aria-label="结束日期" type="date" value={logUntil} onChange={(event) => setLogUntil(event.target.value)}/><button type="button" onClick={() => window.open(`/api/logs/export?format=jsonl&q=${encodeURIComponent(logQuery)}&level=${encodeURIComponent(logLevel)}&subsystem=${encodeURIComponent(logSubsystem)}&since=${encodeURIComponent(logSince)}&until=${encodeURIComponent(logUntil ? `${logUntil}T23:59:59` : '')}`, '_blank', 'noopener,noreferrer')}>JSONL</button><button type="button" onClick={() => window.open(`/api/logs/export?format=csv&q=${encodeURIComponent(logQuery)}&level=${encodeURIComponent(logLevel)}&subsystem=${encodeURIComponent(logSubsystem)}&since=${encodeURIComponent(logSince)}&until=${encodeURIComponent(logUntil ? `${logUntil}T23:59:59` : '')}`, '_blank', 'noopener,noreferrer')}>CSV</button></div><div className="log-list">{logEvents.map((item) => <article className="log-item" key={item.id}><i className={item.level === 'error' || item.status === 'failed' ? 'failed' : ''}/><div><strong>{item.summary || item.event_type}</strong><small>{item.subsystem} · {item.status} · {new Date(item.occurred_at).toLocaleString()}</small></div>{item.duration_ms != null && <em>{Math.round(item.duration_ms)} ms</em>}{(item.input_tokens != null || item.output_tokens != null) && <em>{item.input_tokens ?? '—'} in / {item.output_tokens ?? '—'} out</em>}{item.estimated_cost != null && <em>≈ {item.estimated_cost.toFixed(6)} {item.cost_currency}</em>}</article>)}{!logEvents.length && <div className="empty-sessions">没有匹配的运行记录</div>}</div></section></div>}

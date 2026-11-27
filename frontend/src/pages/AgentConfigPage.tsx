@@ -20,6 +20,7 @@ type Agent = {
   selected_database_connections?: string[];
   selected_agents?: string[];
   sandbox_code_enabled?: boolean;
+  max_rounds?: number;
   prompt_variables?: Record<string, string>;
   input_rate_per_million?: number | null;
   output_rate_per_million?: number | null;
@@ -61,6 +62,7 @@ export function AgentConfigPage({ onSaved }: AgentConfigPageProps) {
   const [agentChoices, setAgentChoices] = useState<Agent[]>([]);
   const [selectedAgents, setSelectedAgents] = useState<string[]>([]);
   const [sandboxCodeEnabled, setSandboxCodeEnabled] = useState(false);
+  const [maxRounds, setMaxRounds] = useState(500);
   const [legacySkillsWarning, setLegacySkillsWarning] = useState(false);
   const [modelMigrationWarnings, setModelMigrationWarnings] = useState<string[]>([]);
   const [promptVersions, setPromptVersions] = useState<PromptVersion[]>([]);
@@ -91,7 +93,7 @@ export function AgentConfigPage({ onSaved }: AgentConfigPageProps) {
       setMode('react');
       setConnectionStatus(''); setSystemPrompt(''); setPromptVariables({});
       setPromptPreview(''); setSkillChoices([]); setMcpChoices([]); setLocalToolChoices([]);
-      setSelectedSkills([]); setSelectedMcpTools([]); setSelectedLocalTools([]); setSelectedKnowledgeBases([]); setKnowledgeBaseChoices([]); setSelectedDatabaseConnections([]); setDatabaseChoices([]); setAgentChoices([]); setSelectedAgents([]); setSandboxCodeEnabled(false); setPromptVersions([]);
+      setSelectedSkills([]); setSelectedMcpTools([]); setSelectedLocalTools([]); setSelectedKnowledgeBases([]); setKnowledgeBaseChoices([]); setSelectedDatabaseConnections([]); setDatabaseChoices([]); setAgentChoices([]); setSelectedAgents([]); setSandboxCodeEnabled(false); setMaxRounds(500); setPromptVersions([]);
       hydrated.current = true;
       Promise.all([
         api<ModelConfig[]>('/models'),
@@ -150,6 +152,7 @@ export function AgentConfigPage({ onSaved }: AgentConfigPageProps) {
       setSelectedDatabaseConnections(agent.selected_database_connections ?? []);
       setSelectedAgents(agent.selected_agents ?? []);
       setSandboxCodeEnabled(agent.sandbox_code_enabled ?? false);
+      setMaxRounds(agent.max_rounds ?? 500);
       setLegacySkillsWarning(migrationStatus.warnings.some((warning) => warning.includes(agent.name)));
       setPromptVersions(versions);
       setLoading(false);
@@ -171,7 +174,7 @@ export function AgentConfigPage({ onSaved }: AgentConfigPageProps) {
       context_window: contextWindow, selected_skills: selectedSkills,
       selected_mcp_tools: selectedMcpTools, selected_local_tools: selectedLocalTools,
       selected_knowledge_bases: selectedKnowledgeBases,
-      selected_database_connections: selectedDatabaseConnections, selected_agents: selectedAgents, sandbox_code_enabled: sandboxCodeEnabled,
+      selected_database_connections: selectedDatabaseConnections, selected_agents: selectedAgents, sandbox_code_enabled: sandboxCodeEnabled, max_rounds: maxRounds,
       prompt_variables: promptVariables, input_rate_per_million: null, output_rate_per_million: null,
     };
     setSaveStatus((status) => status === 'error' ? status : 'idle');
@@ -188,7 +191,7 @@ export function AgentConfigPage({ onSaved }: AgentConfigPageProps) {
       });
     }, 500);
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [editingAgentId, loading, agentName, modelConfigId, mode, systemPrompt, contextWindow, selectedSkills, selectedMcpTools, selectedLocalTools, selectedKnowledgeBases, selectedDatabaseConnections, selectedAgents, sandboxCodeEnabled, promptVariables, saveRevision]);
+  }, [editingAgentId, loading, agentName, modelConfigId, mode, systemPrompt, contextWindow, maxRounds, selectedSkills, selectedMcpTools, selectedLocalTools, selectedKnowledgeBases, selectedDatabaseConnections, selectedAgents, sandboxCodeEnabled, promptVariables, saveRevision]);
 
   useEffect(() => {
     if (!editingAgentId || (saveStatus !== 'idle' && saveStatus !== 'saving' && saveStatus !== 'error')) return;
@@ -210,7 +213,7 @@ export function AgentConfigPage({ onSaved }: AgentConfigPageProps) {
           system_prompt: systemPrompt, context_window: contextWindow,
           selected_skills: selectedSkills, selected_mcp_tools: selectedMcpTools,
           selected_local_tools: selectedLocalTools, selected_knowledge_bases: selectedKnowledgeBases,
-          selected_database_connections: selectedDatabaseConnections, selected_agents: selectedAgents, sandbox_code_enabled: sandboxCodeEnabled,
+          selected_database_connections: selectedDatabaseConnections, selected_agents: selectedAgents, sandbox_code_enabled: sandboxCodeEnabled, max_rounds: maxRounds,
           prompt_variables: promptVariables,
         }),
       });
@@ -266,7 +269,7 @@ export function AgentConfigPage({ onSaved }: AgentConfigPageProps) {
       context_window: contextWindow, selected_skills: selectedSkills,
       selected_mcp_tools: selectedMcpTools, selected_local_tools: selectedLocalTools,
       selected_knowledge_bases: selectedKnowledgeBases,
-      selected_database_connections: selectedDatabaseConnections, selected_agents: selectedAgents, sandbox_code_enabled: sandboxCodeEnabled,
+      selected_database_connections: selectedDatabaseConnections, selected_agents: selectedAgents, sandbox_code_enabled: sandboxCodeEnabled, max_rounds: maxRounds,
       prompt_variables: promptVariables, input_rate_per_million: null, output_rate_per_million: null,
     };
     setSaveStatus('saving');
@@ -325,12 +328,13 @@ export function AgentConfigPage({ onSaved }: AgentConfigPageProps) {
             {editingAgentId && <label>使用模型<select value={modelConfigId} onChange={(event) => setModelConfigId(event.target.value)} required><option value="">请选择模型</option>{modelConfigs.map((item) => <option key={item.id} value={item.id}>{item.name}{!item.credential_configured ? '（缺少凭据）' : ''}</option>)}</select><small className="plugin-helper">共享模型的地址、型号或密钥变更会应用到所有关联智能体。</small><button className="inline-link-button" type="button" onClick={() => navigate('/plugins?tab=Model')}>管理模型</button></label>}
             <label>运行方式<select value={mode} onChange={(event) => setMode(event.target.value as 'react' | 'plan_execute')}><option value="react">灵感对话（默认）</option><option value="plan_execute">计划并执行</option></select></label>
             <label>上下文窗口（Token）<input type="number" min={1024} max={2000000} step={1024} value={contextWindow} onChange={(event) => setContextWindow(Number(event.target.value))}/></label>
+            <label>最大模型轮次（单次请求）<input type="number" min={-1} max={10000} step={1} value={maxRounds} onChange={(event) => setMaxRounds(Number(event.target.value))}/><small>-1 表示不限，持续运行直到手动停止；默认 500。</small></label>
             <label>系统提示词<textarea className="prompt-input" value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} rows={4} placeholder="支持 {{variable}} 变量，例如：称呼用户为 {{user_name}}"/></label>
             {systemPrompt.match(/\{\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}\}/g)?.filter((token, index, all) => all.indexOf(token) === index).map((token) => { const variable = token.replace(/[{}\s]/g, ''); return <label className="prompt-variable" key={variable}>{variable}<input value={promptVariables[variable] ?? ''} onChange={(event) => setPromptVariables((values) => ({ ...values, [variable]: event.target.value }))} placeholder={`填写 ${variable}`}/></label>; })}
             {editingAgentId && <div className="prompt-preview-actions"><button type="button" onClick={previewPrompt}>预览解析结果（本地，不调用模型）</button></div>}{promptPreview && <pre className="prompt-preview">{promptPreview}</pre>}
             {legacySkillsWarning && <div className="plugin-message error">旧版 Skills 目录迁移未完成，原配置路径已保留；请检查文件夹权限，并将需要的 Skill 从 ZIP 加载到插件库后重新勾选。</div>}
             <div className="skill-choice-list"><small>可委派的智能体（默认无授权；仅允许所选 Agent 接收任务）</small>{agentChoices.filter((item) => item.id !== editingAgentId).map((agent) => <label key={agent.id} className="skill-choice"><input type="checkbox" checked={selectedAgents.includes(agent.id)} onChange={(event) => setSelectedAgents((items) => event.target.checked ? [...items, agent.id] : items.filter((id) => id !== agent.id))}/><span><strong>{agent.name}</strong><small>{agent.model_config_name ?? agent.model}</small></span></label>)}{!agentChoices.some((item) => item.id !== editingAgentId) && <small>暂无其他智能体；创建后可以配置委派目标。</small>}</div>
-            <label className="skill-choice"><input type="checkbox" checked={sandboxCodeEnabled} onChange={(event) => setSandboxCodeEnabled(event.target.checked)}/><span><strong>允许在 CubeSandbox 运行生成的 Python</strong><small>沙箱未配置时不会回退到本机；每次运行都需要审批。</small></span></label>
+            <label className="skill-choice"><input type="checkbox" checked={sandboxCodeEnabled} onChange={(event) => setSandboxCodeEnabled(event.target.checked)}/><span><strong>允许生成并执行 Python 代码</strong><small>可在对话中选择全部允许或用户审批。运行位置可选择本机工作分组或 Docker 沙箱；本机代码不是沙箱。</small></span></label>
             <div className="skill-choice-list"><small>为此智能体启用已加载的 Skills。</small>{skillChoices.map((skill) => <label key={skill.name} className="skill-choice"><input type="checkbox" checked={selectedSkills.includes(skill.name)} onChange={(event) => setSelectedSkills((items) => event.target.checked ? [...items, skill.name] : items.filter((name) => name !== skill.name))}/><span><strong>{skill.name}</strong><small>{skill.description}</small></span></label>)}{!skillChoices.length && <small>暂无已加载 Skill。请先在插件库导入 ZIP。</small>}</div>
             <div className="skill-choice-list"><small>启用后，MCP 工具可由模型直接调用，不逐次审批。</small>{mcpChoices.map((tool) => <label key={tool.id} className="skill-choice"><input type="checkbox" checked={selectedMcpTools.includes(tool.id)} onChange={(event) => setSelectedMcpTools((items) => event.target.checked ? [...items, tool.id] : items.filter((id) => id !== tool.id))}/><span><strong>{tool.name}</strong><small>{tool.description} · {tool.risk === 'read_only' ? '只读' : '可能修改数据'}</small></span></label>)}{!mcpChoices.length && <small>暂无已连接 MCP 工具。请在插件库配置并连接。</small>}</div>
             <div className="skill-choice-list"><small>为此智能体启用本地 Python Tools。</small>{localToolChoices.map((tool) => <label key={tool.id} className="skill-choice"><input type="checkbox" checked={selectedLocalTools.includes(tool.id)} onChange={(event) => setSelectedLocalTools((items) => event.target.checked ? [...items, tool.id] : items.filter((id) => id !== tool.id))}/><span><strong>{tool.name}</strong><small>{tool.description} · {tool.risk === 'read_only' ? '只读' : '需批准'}</small></span></label>)}{!localToolChoices.length && <small>暂无已加载 Tool。请先在插件库导入或编写。</small>}</div>
@@ -348,7 +352,7 @@ export function AgentConfigPage({ onSaved }: AgentConfigPageProps) {
           prompt_variables: promptVariables, selected_skills: selectedSkills,
           selected_mcp_tools: selectedMcpTools, selected_local_tools: selectedLocalTools,
           selected_knowledge_bases: selectedKnowledgeBases,
-          selected_database_connections: selectedDatabaseConnections, selected_agents: selectedAgents, sandbox_code_enabled: sandboxCodeEnabled,
+          selected_database_connections: selectedDatabaseConnections, selected_agents: selectedAgents, sandbox_code_enabled: sandboxCodeEnabled, max_rounds: maxRounds,
         }}/>}
         </div>
       )}

@@ -30,5 +30,8 @@ def test_stdio_server_requires_confirmation_and_connects(tmp_path):
         assert connected.json()["tools"] == ["read"]
         listed = client.get("/api/mcp/servers").json()
         assert listed[0]["connected"] is True
-        disconnected = client.post(f"/api/mcp/servers/{server['id']}/disconnect")
+    with TestClient(create_app(tmp_path / "stdio.sqlite3")) as restarted:
+        assert restarted.get("/api/mcp/servers").json()[0]["connected"] is True
+        assert restarted.get(f"/api/mcp/servers/{server['id']}/tools").json()[0]["name"] == "local-tool/read"
+        disconnected = restarted.post(f"/api/mcp/servers/{server['id']}/disconnect")
         assert disconnected.status_code == 200

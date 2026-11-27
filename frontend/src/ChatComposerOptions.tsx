@@ -8,7 +8,17 @@ type Option = { id: string; name: string; group?: string; description?: string }
 export type CapabilitySelection = Record<Kind, Option[]>;
 export type ChatOptions = { options: CapabilitySelection; defaults: Record<Kind, string[]> };
 export type ModelOption = { id: string; name: string; model: string; credential_configured: boolean; last_tested_at: string | null };
-export type ChatPreference = { capabilities?: CapabilitySelection; model?: Pick<ModelOption, 'id' | 'name'> };
+export type ApprovalMode = 'allow_all' | 'user_approval';
+export const DEFAULT_APPROVAL_MODE: ApprovalMode = 'allow_all';
+export type ChatPreference = {
+  capabilities?: CapabilitySelection;
+  model?: Pick<ModelOption, 'id' | 'name'>;
+  approval_mode?: ApprovalMode;
+};
+
+export function normalizeApprovalMode(value: unknown): ApprovalMode {
+  return value === 'user_approval' ? 'user_approval' : DEFAULT_APPROVAL_MODE;
+}
 
 const categories = {
   local_tools: { name: '工具', icon: '⚒', limit: 100 },
@@ -23,9 +33,14 @@ export function defaultCapabilities(catalog: ChatOptions): CapabilitySelection {
   )])) as CapabilitySelection;
 }
 
-export function chatRequestOptions(selection: CapabilitySelection, model?: ChatPreference['model']) {
+export function chatRequestOptions(
+  selection: CapabilitySelection,
+  model?: ChatPreference['model'],
+  approvalMode: ApprovalMode = DEFAULT_APPROVAL_MODE,
+) {
   return {
     capabilities: Object.fromEntries(kinds.map((kind) => [kind, selection[kind].map((item) => item.id)])),
+    approval_mode: approvalMode,
     ...(model ? { model_config_id: model.id } : {}),
   };
 }
@@ -101,6 +116,21 @@ export function ChatCapabilitiesPicker({ catalog, selection, onChange, onReset, 
       }))}
     </div>}
   </div>;
+}
+
+export function ApprovalModePicker({ value, onChange, disabled }: {
+  value: ApprovalMode;
+  onChange: (value: ApprovalMode) => void;
+  disabled: boolean;
+}) {
+  return <label className="approval-mode-picker">
+    <span>执行权限</span>
+    <select aria-label="工具执行权限" value={value} disabled={disabled}
+      onChange={(event) => onChange(normalizeApprovalMode(event.target.value))}>
+      <option value="allow_all">全部允许</option>
+      <option value="user_approval">用户审批</option>
+    </select>
+  </label>;
 }
 
 export function ChatModelPicker({ models, model, defaultName, onChange, loading, error, refresh, disabled }:

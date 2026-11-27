@@ -1,4 +1,3 @@
-import ipaddress
 import json
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
@@ -55,40 +54,10 @@ def update_tool(tool_id: str, request: Request, payload: dict):
         raise HTTPException(status_code=400, detail=str(error)) from None
 
 
-def _require_local_peer(request: Request):
-    try:
-        local = request.client is not None and ipaddress.ip_address(request.client.host).is_loopback
-    except ValueError:
-        local = False
-    if not local:
-        raise HTTPException(status_code=403, detail='只能在本机确认工具执行方式')
-
-
 @router.put('/{tool_id}/windows-trust')
-def trust_windows_tool(tool_id: str, request: Request, payload: dict):
-    _require_local_peer(request)
-    digest = payload.get('source_sha256')
-    if payload.get('confirmed') is not True or not isinstance(digest, str) or len(digest) != 64:
-        raise HTTPException(status_code=422, detail='请明确确认当前版本的工具源码')
-    try:
-        return request.app.state.local_tool_manager.set_windows_trust(tool_id, source_sha256=digest)
-    except KeyError:
-        raise HTTPException(status_code=404, detail='Tool 不存在') from None
-    except ValueError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from None
-    except RuntimeError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from None
-
-
 @router.delete('/{tool_id}/windows-trust')
-def revoke_windows_tool(tool_id: str, request: Request):
-    _require_local_peer(request)
-    try:
-        return request.app.state.local_tool_manager.set_windows_trust(tool_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail='Tool 不存在') from None
-    except ValueError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from None
+def obsolete_windows_trust(tool_id: str):
+    raise HTTPException(status_code=410, detail='Tool 执行方式已由对话中的本机 PowerShell 或 Docker 沙箱选择控制')
 
 
 @router.delete("/{tool_id}", status_code=204)

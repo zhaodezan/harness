@@ -1,57 +1,50 @@
-"""Fixed child entry point for the deliberately small, pure-expression Tool subset.
+"""Fixed child entry point for trusted Python Tools executed by Windows PowerShell.
 
-Interpret the expression rather than importing, compiling or executing plugin code.
+The parent sends source and arguments as JSON over stdin.  The source never appears
+in the PowerShell command line; this process is constrained by the parent's job
+object and output limits.
 """
-import ast
+import asyncio
+import inspect
 import json
-from pathlib import Path
 import sys
 
-# This file is shipped with the application, not with the installed plugin.
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-from backend.app.function_tools import function_tool_metadata
-from backend.app.tools import ToolRegistry
 
-
-def evaluate(node, values):
-    if node is None:
-        return None
-    if isinstance(node, ast.Constant):
-        return node.value
-    if isinstance(node, ast.Name):
-        return values[node.id]
-    if isinstance(node, ast.JoinedStr):
-        result = ''.join(evaluate(part, values) for part in node.values)
-    elif isinstance(node, ast.FormattedValue):
-        value = evaluate(node.value, values)
-        result = {115: str, 114: repr, 97: ascii, -1: str}[node.conversion](value)
-    elif isinstance(node, ast.UnaryOp):
-        value = evaluate(node.operand, values)
-        return +value if isinstance(node.op, ast.UAdd) else -value
-    elif isinstance(node, ast.BinOp):
-        left, right = evaluate(node.left, values), evaluate(node.right, values)
-        result = left + right if isinstance(node.op, ast.Add) else left - right
-    else:
-        raise ValueError('Unsupported expression')
-    if isinstance(result, (str, list)) and len(result) > 65536:
-        raise ValueError('Result too large')
-    return result
-
-
+WORKER_RESULT_PREFIX = 'HARNESS_TOOL_RESULT:'
 def execute(payload):
-    tree = ast.parse(payload['source'])
-    metadata = function_tool_metadata(tree)
-    if metadata['risk'] != 'read_only' or metadata['name'] != payload['function_name']:
-        raise ValueError('Not a supported pure function')
-    arguments = payload['arguments']
-    ToolRegistry._validate(metadata['input_schema'], arguments)
-    values = {name: spec['default'] for name, spec in metadata['input_schema']['properties'].items()
-              if 'default' in spec}
-    values.update(arguments)
-    function = next(node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)))
-    return evaluate(function.body[-1].value, values)
+    source = payload.get('source')
+    arguments = payload.get('arguments')
+    if not isinstance(source, str) or not isinstance(arguments, dict):
+        raise ValueError('Python Tool 请求无效')
+
+    scope = {'__name__': '__main__', '__file__': '<python-tool>'}
+    exec(compile(source, '<python-tool>', 'exec'), scope)
+    function_name = payload.get('function_name')
+    if function_name is not None:
+        if not isinstance(function_name, str) or not function_name.isidentifier():
+            raise ValueError('Python Tool 函数名无效')
+        entry = scope.get(function_name)
+        if not callable(entry):
+            raise ValueError('Python Tool 函数不存在')
+        result = entry(**arguments)
+    else:
+        entry = scope.get('run')
+        if not callable(entry):
+            raise ValueError('Python Tool 必须定义 run(arguments)')
+        result = entry(arguments)
+    if inspect.isawaitable(result):
+        result = asyncio.run(result)
+    return result
 
 
 if __name__ == '__main__':
     payload = json.load(sys.stdin)
-    print(json.dumps({'result': execute(payload)}, allow_nan=False))
+    if payload.get('directory'):
+        import os
+        os.chdir(payload['directory'])
+    result_token = payload.get('_result_token')
+    if not isinstance(result_token, str) or not result_token:
+        raise ValueError('Python Tool 响应协议无效')
+    print(f'{WORKER_RESULT_PREFIX}{result_token}:' + json.dumps(
+        {'result': execute(payload)}, allow_nan=False,
+    ))

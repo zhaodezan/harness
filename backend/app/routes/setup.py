@@ -26,7 +26,15 @@ class ModelSetup(BaseModel):
     selected_database_connections: list[str] = Field(default_factory=list, max_length=100)
     selected_agents: list[str] = Field(default_factory=list, max_length=20)
     sandbox_code_enabled: bool = False
+    max_rounds: int = Field(default=500, strict=True, ge=-1, le=10000)
     prompt_variables: dict[str, str] = Field(default_factory=dict, max_length=50)
+
+    @field_validator("max_rounds")
+    @classmethod
+    def valid_max_rounds(cls, value: int) -> int:
+        if value != -1 and not 1 <= value <= 10000:
+            raise ValueError("最大轮次必须为 -1 或 1 到 10000 的整数")
+        return value
 
     @field_validator("mode")
     @classmethod
@@ -103,11 +111,11 @@ def configure_model(payload: ModelSetup, request: Request):
         agent_id = uuid4().hex
         selected_agents = _validate_delegation_targets(connection, agent_id, payload.selected_agents)
         connection.execute(
-            "INSERT INTO agents(id,name,provider,base_url,model,system_prompt,mode,context_window,skill_directory,selected_skills_json,selected_agents_json,sandbox_code_enabled,selected_mcp_tools_json,selected_local_tools_json,selected_knowledge_bases_json,selected_database_connections_json,prompt_variables_json,model_config_id) "
-            "VALUES(?,?,?,'','',?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO agents(id,name,provider,base_url,model,system_prompt,mode,context_window,skill_directory,selected_skills_json,selected_agents_json,sandbox_code_enabled,max_rounds,selected_mcp_tools_json,selected_local_tools_json,selected_knowledge_bases_json,selected_database_connections_json,prompt_variables_json,model_config_id) "
+            "VALUES(?,?,?,'','',?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (agent_id, payload.name.strip(), "openai_compatible", payload.system_prompt, payload.mode,
              payload.context_window, payload.skill_directory, json.dumps(payload.selected_skills),
-             json.dumps(selected_agents), int(payload.sandbox_code_enabled),
+             json.dumps(selected_agents), int(payload.sandbox_code_enabled), payload.max_rounds,
              json.dumps(payload.selected_mcp_tools), json.dumps(payload.selected_local_tools),
              json.dumps(payload.selected_knowledge_bases), json.dumps(payload.selected_database_connections),
              json.dumps(payload.prompt_variables), payload.model_config_id),

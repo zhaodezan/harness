@@ -4,7 +4,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from backend.app.main import create_app
-from model_test_utils import create_test_agent
+from model_test_utils import create_test_model, create_test_agent
 
 
 class DebugSecrets:
@@ -46,6 +46,94 @@ def test_debug_uses_unsaved_model_selection_without_sending_credentials(tmp_path
     assert '"text":"draft-answer"' in response.text
     assert any(body.get("model") == "draft-model" and auth == "Bearer draft-key" for body, auth in requests)
     assert "draft-key" not in response.text
+
+
+
+def test_debug_uses_max_rounds_from_request_snapshot(tmp_path):
+    requests = []
+
+    async def provider(request):
+        body = json.loads(await request.aread())
+        requests.append(body)
+        content = '1. First step' if any('仅制定' in message.get('content', '') for message in body['messages']) else 'done'
+        frame = {'choices': [{'delta': {'content': content}}]}
+        return httpx.Response(
+            200,
+            text=f'data: {json.dumps(frame)}\n\ndata: [DONE]\n\n',
+        )
+
+    app = create_app(
+        tmp_path / 'max-rounds-debug.sqlite3',
+        data_dir=tmp_path / 'data',
+        secret_store=DebugSecrets(),
+        http_transport=httpx.MockTransport(provider),
+    )
+    with TestClient(app) as client:
+        model_id = create_test_model(app)
+        agent = create_test_agent(client, {
+            'name': 'Draft Limits', 'model_config_id': model_id, 'max_rounds': 2,
+        }).json()
+        response = client.post(f"/api/agents/{agent['id']}/debug", json={
+            'config': {
+                'model_config_id': model_id, 'mode': 'plan_execute', 'max_rounds': 1,
+            },
+            'messages': [{'role': 'user', 'content': 'Do one thing'}],
+        })
+
+    assert response.status_code == 200, response.text
+    assert 'max_rounds_reached' in response.text
+    assert 'event: done' not in response.text
+    assert len(requests) == 1
+
+
+def test_debug_final_text_at_round_limit_completes(tmp_path):
+    calls = []
+
+    async def provider(request):
+        calls.append(json.loads(await request.aread()))
+        return httpx.Response(200, text='data: {"choices":[{"delta":{"content":"final"}}]}\n\ndata: [DONE]\n\n')
+
+    app = create_app(tmp_path / 'final.sqlite3', data_dir=tmp_path / 'data',
+                     secret_store=DebugSecrets(), http_transport=httpx.MockTransport(provider))
+    with TestClient(app) as client:
+        model_id = create_test_model(app)
+        agent = create_test_agent(client, {'name': 'Debug', 'model_config_id': model_id}).json()
+        response = client.post(f"/api/agents/{agent['id']}/debug", json={
+            'config': {'model_config_id': model_id, 'max_rounds': 1},
+            'messages': [{'role': 'user', 'content': 'hello'}],
+        })
+    assert len(calls) == 1
+    assert 'event: done' in response.text
+    assert 'max_rounds_reached' not in response.text
+
+
+def test_debug_tool_call_at_round_limit_still_stops_before_next_call(tmp_path):
+    from backend.app.tools import ToolDefinition
+    from test_chat_options import invoke
+
+    calls, executions = [], []
+
+    async def provider(request):
+        calls.append(json.loads(await request.aread()))
+        return invoke('round_tool', {})
+
+    app = create_app(tmp_path / 'tool.sqlite3', data_dir=tmp_path / 'data',
+                     secret_store=DebugSecrets(), http_transport=httpx.MockTransport(provider))
+    app.state.tool_registry.register(ToolDefinition(
+        'round_tool', 'Test', {'type': 'object', 'properties': {}}, 'read_only',
+        lambda _: executions.append(True) or 'ok',
+    ))
+    with TestClient(app) as client:
+        model_id = create_test_model(app)
+        agent = create_test_agent(client, {'name': 'Debug', 'model_config_id': model_id}).json()
+        response = client.post(f"/api/agents/{agent['id']}/debug", json={
+            'config': {'model_config_id': model_id, 'max_rounds': 1},
+            'messages': [{'role': 'user', 'content': 'hello'}],
+        })
+    assert len(calls) == 1
+    assert executions == [True]
+    assert 'max_rounds_reached' in response.text
+    assert 'event: done' not in response.text
 
 
 def test_plan_execute_debug_runs_steps_after_planning(tmp_path):

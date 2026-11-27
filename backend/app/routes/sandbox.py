@@ -1,44 +1,69 @@
+from __future__ import annotations
+
 import json
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.db import database_connection
-from backend.app.runtime.cube_sandbox import SandboxSettings
+from backend.app.runtime.docker_sandbox import DockerSandboxSettings, DockerSandboxUnavailable
 
 router = APIRouter(prefix="/api/sandbox", tags=["sandbox"])
-SETTING_KEY = "cubesandbox"
-SECRET_KEY = "cubesandbox:api_key"
+SETTING_KEY = "docker_sandbox"
+DEFAULTS = {
+    "enabled": False,
+    "image": "python:3.11-slim",
+    "timeout_seconds": 30,
+    "memory_mb": 512,
+    "cpu_count": 1,
+    "network_enabled": False,
+}
+PUBLIC_FIELDS = tuple(DEFAULTS)
 
 
 class SandboxConfigPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool = False
-    api_url: str = Field(min_length=1, max_length=2048)
-    template_id: str = Field(min_length=1, max_length=128)
+    image: str = Field(default="python:3.11-slim", min_length=1, max_length=256)
     timeout_seconds: int = Field(default=30, ge=1, le=300)
-    allow_internet_access: bool = True
-    api_key: str | None = Field(default=None, max_length=4096)
+    memory_mb: int = Field(default=512, ge=128, le=8192)
+    cpu_count: int = Field(default=1, ge=1, le=8)
+    network_enabled: bool = False
 
 
 def _stored_settings(request: Request) -> dict:
     with database_connection(request.app.state.database_path) as connection:
-        row = connection.execute("SELECT value_json FROM app_settings WHERE key=?", (SETTING_KEY,)).fetchone()
-    settings = json.loads(row["value_json"]) if row else {}
-    settings["api_key"] = request.app.state.secret_store.get(SECRET_KEY) or ""
-    return settings
+        row = connection.execute(
+            "SELECT value_json FROM app_settings WHERE key=?", (SETTING_KEY,)
+        ).fetchone()
+    if row is None:
+        return dict(DEFAULTS)
+    try:
+        values = json.loads(row["value_json"])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return dict(DEFAULTS)
+    if not isinstance(values, dict):
+        return dict(DEFAULTS)
+    # Filter both malformed values and any historical remote sandbox keys.
+    return {**DEFAULTS, **{key: values[key] for key in PUBLIC_FIELDS if key in values}}
+
+
+def _configured(request: Request, values: dict) -> bool:
+    if not values.get("enabled"):
+        return False
+    try:
+        return bool(request.app.state.sandbox_executor.is_configured(values))
+    except TypeError:
+        # Keep simple test/integration doubles that expose the no-argument API.
+        return bool(request.app.state.sandbox_executor.is_configured())
+    except Exception:
+        return False
 
 
 def _public_settings(request: Request) -> dict:
-    settings = _stored_settings(request)
-    key_configured = bool(settings.pop("api_key", ""))
-    configured = bool(
-        settings.get("enabled") and settings.get("api_url") and settings.get("template_id") and key_configured
-    )
-    defaults = {
-        "enabled": False, "api_url": "", "template_id": "", "timeout_seconds": 30,
-        "allow_internet_access": True,
-    }
-    return {**defaults, **settings, "configured": configured, "key_configured": key_configured}
+    values = _stored_settings(request)
+    return {**values, "configured": _configured(request, values)}
 
 
 @router.get("")
@@ -48,39 +73,40 @@ def get_sandbox_settings(request: Request):
 
 @router.put("")
 def put_sandbox_settings(payload: SandboxConfigPayload, request: Request):
-    existing_key = request.app.state.secret_store.get(SECRET_KEY)
-    api_key = payload.api_key.strip() if payload.api_key and payload.api_key.strip() else existing_key
-    values = {
-        "enabled": payload.enabled,
-        "api_url": payload.api_url.strip(),
-        "template_id": payload.template_id.strip(),
-        "timeout_seconds": payload.timeout_seconds,
-        "allow_internet_access": payload.allow_internet_access,
-    }
-    # Validate structure without requiring that an intentionally disabled entry has a key.
-    candidate = {**values, "api_key": api_key or "placeholder-key", "enabled": True}
+    values = payload.model_dump()
+    # Validate the image and all resource fields even when the entry is being
+    # disabled.  The executor's settings parser intentionally rejects disabled
+    # entries for execution, so validate a temporary enabled candidate here.
     try:
-        SandboxSettings.from_value(candidate)
-    except Exception as error:
+        DockerSandboxSettings.from_value({**values, "enabled": True})
+    except DockerSandboxUnavailable as error:
         raise HTTPException(status_code=422, detail=str(error)) from None
-    if payload.enabled and not api_key:
-        raise HTTPException(status_code=422, detail="启用 CubeSandbox 前必须配置 API Key")
+
+    if values["enabled"] and not _configured(request, values):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "本机 Docker 沙箱不可用；请安装并启动 Docker Desktop，"
+                "并确认指定镜像已存在。应用不会自动拉取镜像。"
+            ),
+        )
     with database_connection(request.app.state.database_path) as connection:
         connection.execute(
             "INSERT INTO app_settings(key,value_json) VALUES(?,?) "
             "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=CURRENT_TIMESTAMP",
             (SETTING_KEY, json.dumps(values, ensure_ascii=False)),
         )
-    if payload.api_key and payload.api_key.strip():
-        request.app.state.secret_store.set(SECRET_KEY, payload.api_key.strip())
     return _public_settings(request)
 
 
 @router.post("/test")
 def test_sandbox_connection(request: Request):
-    settings = _stored_settings(request)
-    if not settings.get("enabled"):
-        raise HTTPException(status_code=409, detail="CubeSandbox 尚未启用")
-    if not request.app.state.sandbox_executor.test_connection(settings):
-        raise HTTPException(status_code=502, detail="无法连接 CubeSandbox 服务，请检查地址、凭据和服务状态")
-    return {"ok": True, "message": "CubeSandbox 连接成功"}
+    values = _stored_settings(request)
+    if not values.get("enabled"):
+        raise HTTPException(status_code=409, detail="本地 Docker 沙箱尚未启用")
+    if not _configured(request, values):
+        raise HTTPException(
+            status_code=409,
+            detail="本机 Docker 或指定镜像不可用；请启动 Docker 并确认镜像已存在",
+        )
+    return {"ok": True, "message": "Docker CLI、Engine 和本地镜像检查通过；未运行容器"}

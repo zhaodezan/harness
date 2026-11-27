@@ -1,0 +1,8 @@
+.workspace-picker { display: grid; gap: 6px; margin: 0 11px 6px; padding: 8px 10px; border: 1px solid #e7ebe7; border-radius: 8px; background: #ffffffdf; }
+.workspace-picker-label { color: #68746b; font-size: 10px; font-weight: 600; }
+.workspace-picker-row { display: flex; gap: 6px; min-width: 0; }
+.workspace-picker-row select, .workspace-picker-row input { min-width: 0; height: 29px; flex: 1; padding: 0 7px; border: 1px solid #e2e7e2; border-radius: 5px; background: white; color: #39443b; font-size: 10px; }
+.workspace-picker-row button { flex-shrink: 0; padding: 0 8px; border: 1px solid #e2e7e2; border-radius: 5px; background: #f8faf8; color: #46554a; font-size: 10px; cursor: pointer; }
+.workspace-picker-row button:disabled, .workspace-picker-row select:disabled, .workspace-picker-row input:disabled { opacity: .58; cursor: not-allowed; }
+.workspace-picker-row select:focus-visible, .workspace-picker-row input:focus-visible, .workspace-picker-row button:focus-visible { outline: 2px solid #4f7159; outline-offset: 2px; }
+.workspace-picker-hint { color: #7d877e; font-size: 9px; overflow-wrap: anywhere; }

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import httpx
@@ -122,6 +123,8 @@ def test_session_can_run_explicit_selected_skill_script_only_after_approval(tmp_
     (folder / "calculate.py").write_text("def run(arguments):\n    return arguments['value'] * 2", encoding="utf-8")
     requests = []
     executed = []
+    local_executed = []
+    local_workspace = []
 
     async def provider(request):
         body = json.loads(await request.aread())
@@ -141,13 +144,18 @@ def test_session_can_run_explicit_selected_skill_script_only_after_approval(tmp_
         async def fake_execute(source, arguments):
             executed.append((source, arguments))
             return 42
+        async def fake_local_execute(source, arguments, *, cwd):
+            local_executed.append((source, arguments))
+            local_workspace.append(cwd)
+            return 42
         app.state.sandbox_executor.execute_python_async = fake_execute
+        app.state.local_code_executor.execute = fake_local_execute
         async with app.router.lifespan_context(app):
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
                 agent = (await create_test_agent_async(client, app, {"name": "Calc", "selected_skills": ["calc"]})).json()
                 session = (await client.post("/api/sessions", json={"agent_id": agent["id"]})).json()
-                task = asyncio.create_task(client.post(f"/api/sessions/{session['id']}/messages", json={"content": "double 21"}))
+                task = asyncio.create_task(client.post(f"/api/sessions/{session['id']}/messages", json={"content": "double 21", "approval_mode": "user_approval"}))
                 for _ in range(200):
                     if app.state.pending_approvals:
                         break
@@ -160,7 +168,14 @@ def test_session_can_run_explicit_selected_skill_script_only_after_approval(tmp_
                 assert response.status_code == 200
 
     asyncio.run(run())
-    assert executed == [("def run(arguments):\n    return arguments['value'] * 2", {"value": 21})]
+    expected = ("def run(arguments):\n    return arguments['value'] * 2", {"value": 21})
+    if os.name == 'nt':
+        assert executed == []
+        assert local_executed == [expected]
+        assert len(local_workspace) == 1 and local_workspace[0].is_dir()
+    else:
+        assert executed == [expected]
+        assert local_executed == []
     assert len(requests) == 2
 
 

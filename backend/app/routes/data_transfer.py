@@ -28,6 +28,18 @@ class ImportPayload(BaseModel):
     database_connections: list[dict] = Field(default_factory=list, max_length=1000)
     scheduled_tasks: list[dict] = Field(default_factory=list, max_length=10000)
 
+def _portable_message_metadata(raw) -> str:
+    # Attachment files live in the local app store, not in portable JSON backups.
+    try:
+        metadata = json.loads(raw)
+        if isinstance(metadata, dict):
+            metadata.pop('images', None)
+            return json.dumps(metadata, ensure_ascii=True)
+    except (TypeError, ValueError, RecursionError):
+        pass
+    return '{}'
+
+
 @router.get("/export")
 def export_data(request: Request):
     with database_connection(request.app.state.database_path) as connection:
@@ -36,7 +48,7 @@ def export_data(request: Request):
         ).fetchall()]
         agents = [dict(row) for row in connection.execute(
             "SELECT id,name,provider,model_config_id,system_prompt,mode,context_window,skill_directory,"
-            "selected_skills_json,selected_agents_json,sandbox_code_enabled,selected_mcp_tools_json,selected_local_tools_json,selected_knowledge_bases_json,selected_database_connections_json,created_at,updated_at "
+            "selected_skills_json,selected_agents_json,sandbox_code_enabled,max_rounds,selected_mcp_tools_json,selected_local_tools_json,selected_knowledge_bases_json,selected_database_connections_json,created_at,updated_at "
             "FROM agents ORDER BY rowid"
         ).fetchall()]
         for agent in agents:
@@ -53,6 +65,8 @@ def export_data(request: Request):
         messages = [dict(row) for row in connection.execute(
             "SELECT id,session_id,role,content,metadata_json,created_at FROM messages ORDER BY rowid"
         ).fetchall()]
+        for message in messages:
+            message['metadata_json'] = _portable_message_metadata(message['metadata_json'])
         memories = [dict(row) for row in connection.execute(
             "SELECT id,content,scope,agent_id,source,created_at,updated_at FROM memories ORDER BY rowid"
         ).fetchall()]
@@ -327,13 +341,13 @@ def import_data(payload: ImportPayload, request: Request, background_tasks: Back
                         )
                         imported_model_count += 1
                 connection.execute(
-                    "INSERT INTO agents(id,name,provider,base_url,model,system_prompt,mode,context_window,skill_directory,selected_skills_json,selected_agents_json,sandbox_code_enabled,selected_mcp_tools_json,selected_local_tools_json,selected_knowledge_bases_json,selected_database_connections_json,prompt_variables_json,model_config_id) "
-                    "VALUES(?,?,?,'','',?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO agents(id,name,provider,base_url,model,system_prompt,mode,context_window,skill_directory,selected_skills_json,selected_agents_json,sandbox_code_enabled,max_rounds,selected_mcp_tools_json,selected_local_tools_json,selected_knowledge_bases_json,selected_database_connections_json,prompt_variables_json,model_config_id) "
+                    "VALUES(?,?,?,'','',?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (new_agent_id, agent["name"].strip(), agent.get("provider", "openai_compatible"),
                      agent.get("system_prompt", ""), agent.get("mode", "react"),
                      agent.get("context_window", 32768), agent.get("skill_directory", ""),
                      json.dumps(selected), "[]", int(bool(agent.get("sandbox_code_enabled", False))),
-                     json.dumps(selected_mcp), json.dumps(selected_local),
+                     agent.get("max_rounds", 500), json.dumps(selected_mcp), json.dumps(selected_local),
                      json.dumps([knowledge_base_map[item] for item in selected_knowledge_bases]),
                      json.dumps([database_map[item] for item in selected_database_connections]),
                      json.dumps(agent.get("prompt_variables", {})), new_model_id),
@@ -379,7 +393,7 @@ def import_data(payload: ImportPayload, request: Request, background_tasks: Back
                     raise HTTPException(status_code=422, detail="导入文件包含无效的对话消息")
                 connection.execute(
                     "INSERT INTO messages(id,session_id,role,content,metadata_json) VALUES(?,?,?,?,?)",
-                    (uuid4().hex, session_id, role, content[:1000000], message.get("metadata_json", "{}")),
+                    (uuid4().hex, session_id, role, content[:1000000], _portable_message_metadata(message.get('metadata_json'))),
                 )
             for prompt in payload.prompt_versions:
                 agent_id = agent_map.get(str(prompt.get("agent_id", "")))

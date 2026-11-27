@@ -1,18 +1,18 @@
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../api';
 import { AgentListPage, AgentListItem } from './AgentListPage';
 
-type Tab = 'Model' | 'Agent' | 'Skill' | 'MCP' | 'Tool' | 'CubeSandbox' | '第三方插件';
+type Tab = 'Model' | 'Agent' | 'Skill' | 'MCP' | 'Tool' | 'Docker 沙箱' | '第三方插件';
 type ThirdPartyTab = 'Dify' | 'DSH';
 type ModelConfig = { id: string; name: string; base_url: string; model: string; credential_configured: boolean; last_tested_at: string | null };
 type Skill = { name: string; description: string };
 type LocalTool = { id: string; name: string; description: string; risk: string; status: string; source: string; error?: string; execution_mode?: 'sandbox' | 'windows_local'; windows_local_available?: boolean; source_sha256?: string };
-type MCPServer = { id: string; name: string; transport: string; url: string; command: string; args: string[]; connected: boolean };
+type MCPServer = { id: string; name: string; transport: string; url: string; command: string; args: string[]; connected: boolean; auto_connect: boolean; connection_error: string | null };
 type MCPTool = { name: string; description: string; risk: string };
 type MCPTransport = 'stdio' | 'sse' | 'streamable_http';
-type SandboxSettings = { enabled: boolean; api_url: string; template_id: string; timeout_seconds: number; allow_internet_access: boolean; configured: boolean; key_configured: boolean };
-const tabs: Tab[] = ['Model', 'Agent', 'Skill', 'MCP', 'Tool', 'CubeSandbox', '第三方插件'];
+type SandboxSettings = { enabled: boolean; image: string; timeout_seconds: number; memory_mb: number; cpu_count: number; network_enabled: boolean; configured: boolean };
+const tabs: Tab[] = ['Model', 'Agent', 'Skill', 'MCP', 'Tool', 'Docker 沙箱', '第三方插件'];
 
 const TOOL_TEMPLATE = `def greet(name: str, punctuation: str = "!") -> str:
     """生成一条简短的问候语。
@@ -41,6 +41,16 @@ type PluginLibraryPageProps = {
   onCreate: () => void;
   onDelete: (agent: AgentListItem) => void;
 };
+
+export async function testLocalDocker(update: (status: { testing: boolean; message: string; error: string }) => void) {
+  update({ testing: true, message: '', error: '' });
+  try {
+    await api('/sandbox/test', { method: 'POST' });
+    update({ testing: false, message: 'Docker CLI、Engine 和本地镜像检查通过；未运行容器。', error: '' });
+  } catch (reason) {
+    update({ testing: false, message: '', error: `${(reason as Error).message} 请检查 Docker CLI、Engine 和本地镜像。` });
+  }
+}
 
 export function PluginLibraryPage({ agents, onConfigure, onCreate, onDelete }: PluginLibraryPageProps) {
   const [params, setParams] = useSearchParams();
@@ -74,15 +84,46 @@ export function PluginLibraryPage({ agents, onConfigure, onCreate, onDelete }: P
   const [mcpEnvText, setMcpEnvText] = useState('');
   const [mcpUrl, setMcpUrl] = useState('');
   const [mcpToken, setMcpToken] = useState('');
-  const [sandbox, setSandbox] = useState<SandboxSettings>({ enabled: false, api_url: '', template_id: '', timeout_seconds: 30, allow_internet_access: true, configured: false, key_configured: false });
-  const [sandboxKey, setSandboxKey] = useState('');
+  const [sandbox, setSandbox] = useState<SandboxSettings>({ enabled: false, image: 'python:3.11-slim', timeout_seconds: 30, memory_mb: 512, cpu_count: 1, network_enabled: false, configured: false });
   const [sandboxTesting, setSandboxTesting] = useState(false);
+  const [sandboxSaving, setSandboxSaving] = useState(false);
+  const sandboxBusy = sandboxTesting || sandboxSaving;
+  const sandboxRequest = useRef(false);
+  const sandboxRevision = useRef(0);
+  const sandboxDirty = useRef(false);
+  const sandboxLoadGeneration = useRef(0);
+  const sandboxInitialized = useRef(false);
+  const [sandboxLoadState, setSandboxLoadState] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [sandboxLoadError, setSandboxLoadError] = useState('');
+  const updateSandbox = (update: (value: SandboxSettings) => SandboxSettings) => {
+    sandboxDirty.current = true;
+    sandboxRevision.current += 1;
+    setSandbox(update);
+  };
 
+  const loadSandbox = async () => {
+    const generation = ++sandboxLoadGeneration.current;
+    const revision = sandboxRevision.current;
+    if (!sandboxInitialized.current) { setSandboxLoadState('loading'); setSandboxLoadError(''); }
+    try {
+      const sandboxConfig = await api<SandboxSettings>('/sandbox');
+      if (generation === sandboxLoadGeneration.current && revision === sandboxRevision.current && !sandboxDirty.current && !sandboxRequest.current) {
+        setSandbox(sandboxConfig);
+        sandboxInitialized.current = true;
+        setSandboxLoadState('ready');
+      }
+    } catch (reason) {
+      if (generation === sandboxLoadGeneration.current && !sandboxInitialized.current) {
+        setSandboxLoadError((reason as Error).message);
+        setSandboxLoadState('error');
+      }
+    }
+  };
   const load = async () => {
-    const [modelList, skillList, toolList, serverList, migrationStatus, sandboxConfig] = await Promise.all([
-      api<ModelConfig[]>('/models'), api<Skill[]>('/skills'), api<LocalTool[]>('/tools'), api<MCPServer[]>('/mcp/servers'), api<{ warnings: string[] }>('/models/migration-status'), api<SandboxSettings>('/sandbox'),
+    const [modelList, skillList, toolList, serverList, migrationStatus] = await Promise.all([
+      api<ModelConfig[]>('/models'), api<Skill[]>('/skills'), api<LocalTool[]>('/tools'), api<MCPServer[]>('/mcp/servers'), api<{ warnings: string[] }>('/models/migration-status'), loadSandbox(),
     ]);
-    setModels(modelList); setModelMigrationWarnings(migrationStatus.warnings); setSkills(skillList); setTools(toolList); setServers(serverList); setSandbox(sandboxConfig);
+    setModels(modelList); setModelMigrationWarnings(migrationStatus.warnings); setSkills(skillList); setTools(toolList); setServers(serverList);
     const discovered: Record<string, MCPTool[]> = {};
     await Promise.all(serverList.filter((server) => server.connected).map(async (server) => {
       discovered[server.id] = await api<MCPTool[]>(`/mcp/servers/${server.id}/tools`).catch(() => []);
@@ -172,21 +213,27 @@ export function PluginLibraryPage({ agents, onConfigure, onCreate, onDelete }: P
     finally { event.target.value = ''; }
   };
   const saveSandbox = async (event: FormEvent) => {
-    event.preventDefault(); setError(''); setMessage('');
+    event.preventDefault();
+    if (sandboxRequest.current || !sandboxInitialized.current) return;
+    sandboxRequest.current = true; setSandboxSaving(true); setError(''); setMessage('');
     try {
       const saved = await api<SandboxSettings>('/sandbox', { method: 'PUT', body: JSON.stringify({
-        enabled: sandbox.enabled, api_url: sandbox.api_url, template_id: sandbox.template_id,
-        timeout_seconds: sandbox.timeout_seconds, allow_internet_access: sandbox.allow_internet_access,
-        api_key: sandboxKey.trim() || undefined,
+        enabled: sandbox.enabled, image: sandbox.image, timeout_seconds: sandbox.timeout_seconds,
+        memory_mb: sandbox.memory_mb, cpu_count: sandbox.cpu_count, network_enabled: sandbox.network_enabled,
       }) });
-      setSandbox(saved); setSandboxKey(''); setMessage('CubeSandbox 配置已保存；API Key 只存储在系统凭据库。');
-    } catch (reason) { setError((reason as Error).message); }
+      sandboxRevision.current += 1; sandboxDirty.current = false;
+      setSandbox(saved); setMessage('本机 Docker 沙箱配置已保存。');
+    } catch (reason) { setError(`${(reason as Error).message} 请检查 Docker CLI、Engine 和本地镜像。`); }
+    finally { sandboxRequest.current = false; setSandboxSaving(false); }
   };
   const testSandbox = async () => {
-    setSandboxTesting(true); setError(''); setMessage('');
-    try { await api('/sandbox/test', { method: 'POST' }); setMessage('CubeSandbox 连接成功。'); }
-    catch (reason) { setError((reason as Error).message); }
-    finally { setSandboxTesting(false); }
+    if (sandboxRequest.current || !sandboxInitialized.current) return;
+    sandboxRequest.current = true;
+    try {
+      await testLocalDocker(({ testing, message, error }) => {
+        setSandboxTesting(testing); setMessage(message); setError(error);
+      });
+    } finally { sandboxRequest.current = false; }
   };
   const createMcp = async (event: FormEvent) => {
     event.preventDefault();
@@ -202,26 +249,24 @@ export function PluginLibraryPage({ agents, onConfigure, onCreate, onDelete }: P
   };
   const toggleMcp = async (server: MCPServer) => {
     try {
-      if (server.connected) await api(`/mcp/servers/${server.id}/disconnect`, { method: 'POST' });
-      else {
+      if (server.connected) {
+        await api(`/mcp/servers/${server.id}/disconnect`, { method: 'POST' });
+        setMessage('已断开 MCP Server，下次启动不会自动连接。');
+      } else {
         const target = server.transport === 'stdio' ? `${server.command} ${server.args.join(' ')}` : server.url;
-        if (!window.confirm(`即将连接 MCP Server：\n${target}\n请确认这是你信任的服务。`)) return;
+        if (!server.auto_connect && !window.confirm(`即将连接 MCP Server：\n${target}\n请确认这是你信任的服务。连接成功后，应用启动时会自动连接。`)) return;
         await api(`/mcp/servers/${server.id}/connect`, { method: 'POST', body: JSON.stringify({ confirmed: true }) });
+        setMessage('MCP Server 已连接，下次启动会自动连接。');
       }
+      setError('');
       await load();
     } catch (reason) { setError((reason as Error).message); }
   };
-  const setWindowsTrust = async (tool: LocalTool) => {
-    const revoke = tool.execution_mode === 'windows_local';
-    if (!revoke) {
-      if (!tool.windows_local_available || !tool.source_sha256) return;
-      if (!window.confirm(`确认使用 Windows PowerShell 执行此版本的只读函数？\n\n${tool.source}\n\n仅解释受限表达式，不执行任意 Python 或 PowerShell 命令。修改源码后系统会重新检查是否符合本机执行条件。`)) return;
-    }
+  const disableMcpAutoConnect = async (id: string) => {
     try {
-      await api<LocalTool>(`/tools/${tool.id}/windows-trust`, revoke ? { method: 'DELETE' } : {
-        method: 'PUT', body: JSON.stringify({ confirmed: true, source_sha256: tool.source_sha256 }),
-      });
-      setError(''); setMessage(revoke ? '已切换至 CubeSandbox' : '已启用 Windows 本机只读执行'); await load();
+      await api(`/mcp/servers/${id}/disconnect`, { method: 'POST' });
+      setError(''); setMessage('已取消 MCP Server 的启动自动连接。');
+      await load();
     } catch (reason) { setError((reason as Error).message); }
   };
   const deleteSkill = async (name: string) => { try { await api(`/skills/${encodeURIComponent(name)}`, { method: 'DELETE' }); await load(); } catch (reason) { setError((reason as Error).message); } };
@@ -274,14 +319,21 @@ export function PluginLibraryPage({ agents, onConfigure, onCreate, onDelete }: P
         <button className="primary-button" type="submit">添加 MCP</button>
       </form>
       {servers.map((server) => <article className="plugin-server-card" key={server.id}>
-        <div className="plugin-card"><div><strong>{server.name}</strong><small>{server.transport === 'stdio' ? `${server.command} ${server.args.join(' ')}` : server.url} · {server.connected ? '已连接' : '未连接'}</small></div><button onClick={() => toggleMcp(server)}>{server.connected ? '断开' : '连接'}</button><button className="danger-button" onClick={() => deleteServer(server.id)}>删除</button></div>
+        <div className="plugin-card">
+          <div><strong>{server.name}</strong><small>{server.transport === 'stdio' ? `${server.command} ${server.args.join(' ')}` : server.url} · {server.connected ? '已连接' : '未连接'}{server.auto_connect ? ' · 启动时自动连接' : ''}</small>
+            {server.connection_error && <small role="status">{server.connection_error}</small>}
+          </div>
+          <button onClick={() => toggleMcp(server)}>{server.connected ? '断开' : server.connection_error ? '重试连接' : '连接'}</button>
+          {!server.connected && server.auto_connect && <button onClick={() => disableMcpAutoConnect(server.id)}>取消自动连接</button>}
+          <button className="danger-button" onClick={() => deleteServer(server.id)}>删除</button>
+        </div>
         {(mcpTools[server.id] ?? []).map((tool) => <div className="mcp-tool" key={tool.name}><span>{tool.name}</span><small>{tool.risk === 'read_only' ? '只读 · 直接调用' : '可能修改数据 · 直接调用'} · {tool.description}</small></div>)}
       </article>)}
       {!servers.length && <p className="plugin-empty">尚未配置 MCP Server。</p>}
     </div>}
     {activeTab === 'Tool' && <div className="plugin-list">
       <div className="plugin-list-head"><h2>本地 Python Tools</h2><label className="plugin-file-button">加载 .py<input type="file" accept=".py,text/x-python" onChange={importTool}/></label></div>
-      <div className="plugin-security-warning">系统自动检测 Windows PowerShell。符合静态验证的简单只读函数默认本机执行，无需逐个确认；其他工具仍需 CubeSandbox，沙箱不可用时不会自动回退。PowerShell 本身不是沙箱。</div>
+      <div className="plugin-security-warning">Windows 上本地 Python Tool 默认通过 PowerShell 子进程执行，PowerShell 不是安全沙箱；在对话中明确选择 Docker 沙箱后才使用本地容器。执行权限可在对话框中选择“全部允许”或“用户审批”。</div>
       <form className="plugin-tool-editor" onSubmit={saveTool}>
         <h3>{editingToolId ? '编辑 Tool' : '编写 Python Tool'}</h3>
         <p className="plugin-helper">每个文件定义一个公开函数，用 Python 类型注解声明参数，在 docstring 的 Args: 中写参数说明。仍支持旧版 TOOL 字典。保存修改后自动重新检查执行条件。</p>
@@ -289,25 +341,28 @@ export function PluginLibraryPage({ agents, onConfigure, onCreate, onDelete }: P
         <div><button className="primary-button" type="submit">{editingToolId ? '保存修改' : '加载 Tool'}</button>{editingToolId && <button type="button" onClick={() => { setEditingToolId(''); setToolSource(TOOL_TEMPLATE); }}>取消</button>}</div>
       </form>
       {tools.map((tool) => <article className="plugin-card" key={tool.id}>
-        <div><strong>{tool.name}</strong><small>{tool.description} · {tool.risk === 'read_only' ? '只读' : '运行前需批准'}{tool.status === 'error' ? ` · ${tool.error}` : ''}</small>
-          <small>{tool.execution_mode === 'windows_local' ? 'Windows PowerShell · 本机执行' : tool.windows_local_available ? 'CubeSandbox · 可启用 Windows 本机执行' : 'CubeSandbox · 不支持本机执行'}</small></div>
-        {tool.windows_local_available && <button type="button" onClick={() => void setWindowsTrust(tool)}>{tool.execution_mode === 'windows_local' ? '切换至 CubeSandbox' : '启用本机执行'}</button>}
+        <div><strong>{tool.name}</strong><small>{tool.description} · {tool.risk === 'read_only' ? '只读' : '可能修改数据'}{tool.status === 'error' ? ` · ${tool.error}` : ''}</small>
+          <small>{tool.execution_mode === 'windows_local' ? 'Windows PowerShell · 默认本机执行' : 'Docker 沙箱 · 由对话执行位置选择'}</small></div>
         <button type="button" onClick={() => { setEditingToolId(tool.id); setToolSource(tool.source); }}>编辑</button><button className="danger-button" onClick={() => deleteTool(tool.id)}>卸载</button>
       </article>)}
       {!tools.length && <p className="plugin-empty">尚未安装自定义 Python Tool。</p>}
     </div>}
-    {activeTab === 'CubeSandbox' && <div className="plugin-list">
-      <div className="plugin-list-head"><div><h2>CubeSandbox 轻量沙箱</h2><p className="plugin-helper">运行 Python Tools、Agent 生成代码和 Skill 脚本的远程隔离环境。</p></div><span className={`model-credential ${sandbox.configured ? 'configured' : 'missing'}`}>{sandbox.configured ? '已配置' : '未配置'}</span></div>
-      <div className="plugin-security-warning">严格隔离：使用 CubeSandbox 的代码在服务未配置、不可连接或执行失败时不会回退到本机。Windows 本机只读工具默认使用 PowerShell，可在 Tool 页面切换至 CubeSandbox。不会挂载本机文件；内网、回环、链路本地和云元数据网段会被禁止访问。请使用可信的 HTTPS CubeSandbox 服务；CPU/内存上限由服务端 Template 管理。</div>
+    {activeTab === 'Docker 沙箱' && <div className="plugin-list">
+      <div className="plugin-list-head"><div><h2>本机 Docker 沙箱</h2><p className="plugin-helper">对话中明确选择 Docker 沙箱时运行 Python Tools、生成代码和 Skill 脚本。</p></div><span className={`model-credential ${sandbox.configured ? 'configured' : 'missing'}`}>{sandboxLoadState === 'loading' ? '加载中' : sandboxLoadState === 'error' ? '加载失败' : sandbox.configured ? '已配置' : '未配置'}</span></div>
+      <div className="plugin-security-warning">只使用本机 Docker Engine，不连接远程 Docker；镜像必须已存在，不自动拉取。沙箱不可用或执行失败时不会回退到本机。默认禁用网络，启用网络后容器可能访问网络。</div>
+      {sandboxLoadState === 'loading' && <p role="status">正在加载沙箱配置…</p>}
+      {sandboxLoadState === 'error' && <div className="plugin-message error" role="alert">沙箱配置加载失败：{sandboxLoadError}。请重试，加载成功前无法修改或测试。 <button type="button" onClick={() => void loadSandbox()}>重试加载沙箱配置</button></div>}
       <form className="plugin-form" onSubmit={saveSandbox}>
-        <label className="plugin-checkbox"><input type="checkbox" checked={sandbox.enabled} onChange={(event) => setSandbox((value) => ({ ...value, enabled: event.target.checked }))}/>启用 CubeSandbox</label>
-        <label>CubeSandbox API 地址<input type="url" value={sandbox.api_url} onChange={(event) => setSandbox((value) => ({ ...value, api_url: event.target.value }))} placeholder="https://sandbox.example.com/cubeapi/v1" required/></label>
-        <label>Python Template ID<input value={sandbox.template_id} onChange={(event) => setSandbox((value) => ({ ...value, template_id: event.target.value }))} placeholder="python-runtime" maxLength={128} required/></label>
-        <label>API Key<input type="password" value={sandboxKey} onChange={(event) => setSandboxKey(event.target.value)} placeholder={sandbox.key_configured ? '已配置；留空保持不变' : '请输入 CubeSandbox API Key'} autoComplete="new-password" required={sandbox.enabled && !sandbox.key_configured}/></label>
-        <label>单次执行超时（秒）<input type="number" min={1} max={300} value={sandbox.timeout_seconds} onChange={(event) => setSandbox((value) => ({ ...value, timeout_seconds: Number(event.target.value) }))} required/></label>
-        <label className="plugin-checkbox"><input type="checkbox" checked={sandbox.allow_internet_access} onChange={(event) => setSandbox((value) => ({ ...value, allow_internet_access: event.target.checked }))}/>允许访问公网（仍禁止访问内网/元数据地址）</label>
-        <p className="plugin-helper">公网访问仅适用于需要外部 API 的任务。每次生成代码都需单独批准；CubeSandbox 服务端必须部署在支持 Linux/KVM 的环境。</p>
-        <div className="model-form-actions"><button className="primary-button" type="submit">保存沙箱配置</button><button className="secondary-button" type="button" disabled={!sandbox.configured || sandboxTesting} onClick={() => void testSandbox()}>{sandboxTesting ? '测试中…' : '测试连接'}</button></div>
+        <fieldset disabled={sandboxBusy || sandboxLoadState !== 'ready'} style={{ display: 'contents' }}>
+        <label className="plugin-checkbox"><input type="checkbox" checked={sandbox.enabled} onChange={(event) => updateSandbox((value) => ({ ...value, enabled: event.target.checked }))}/>启用 Docker 沙箱</label>
+        <label>本地镜像<input value={sandbox.image} onChange={(event) => updateSandbox((value) => ({ ...value, image: event.target.value }))} maxLength={256} required/></label>
+        <label>单次执行超时（秒）<input type="number" min={1} max={300} value={sandbox.timeout_seconds} onChange={(event) => updateSandbox((value) => ({ ...value, timeout_seconds: Number(event.target.value) }))} required/></label>
+        <label>内存（MB）<input type="number" min={128} max={8192} value={sandbox.memory_mb} onChange={(event) => updateSandbox((value) => ({ ...value, memory_mb: Number(event.target.value) }))} required/></label>
+        <label>CPU 数量<input type="number" min={1} max={8} value={sandbox.cpu_count} onChange={(event) => updateSandbox((value) => ({ ...value, cpu_count: Number(event.target.value) }))} required/></label>
+        <label className="plugin-checkbox"><input type="checkbox" checked={sandbox.network_enabled} onChange={(event) => updateSandbox((value) => ({ ...value, network_enabled: event.target.checked }))}/>允许容器联网</label>
+        <p className="plugin-helper">测试使用已保存的配置；请先保存。请安装 Docker CLI、启动本机 Engine 并自行准备镜像。</p>
+        <div className="model-form-actions"><button className="primary-button" type="submit">{sandboxSaving ? '保存中…' : '保存沙箱配置'}</button><button className="secondary-button" type="button" onClick={() => void testSandbox()}>{sandboxTesting ? '测试中…' : '测试本机 Docker'}</button></div>
+        </fieldset>
       </form>
     </div>}
     {activeTab === '第三方插件' && <div className="plugin-list third-party-plugin-panel">
