@@ -10,6 +10,7 @@ import { ChatImages } from '../components/ChatImages';
 import type { ChatImage } from '../components/ChatImages';
 import { isTerminalTrace } from '../runTrace';
 import type { RunTrace } from '../runTrace';
+import { MessageContent } from '../ChartMessageContent';
 
 type DebugConfig = {
   model_config_id: string;
@@ -147,7 +148,7 @@ export function AgentDebugChat({ agentId, config }: Props) {
         {message.role === 'assistant' && <RunTracePanel events={message.trace ?? []}>
           {message.plan && <div className="debug-plan-card"><strong>执行计划</strong><pre>{message.plan}</pre></div>}
         </RunTracePanel>}
-        <div className="debug-message-content">{message.content || (busy && index === messages.length - 1 ? '正在生成…' : '')}</div>
+        <div className="debug-message-content">{message.content ? <MessageContent content={message.content}/> : (busy && index === messages.length - 1 ? '正在生成…' : '')}</div>
         {message.role === 'assistant' && <ChatImages images={message.images}/>}
       </article>)}
     </div>

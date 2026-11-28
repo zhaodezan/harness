@@ -152,9 +152,9 @@ class AgentResponse(BaseModel):
     id: str
     name: str
     provider: str
-    model_config_id: str
-    model: str
-    model_config_name: str
+    model_config_id: str | None
+    model: str | None
+    model_config_name: str | None
     system_prompt: str
     mode: str
     context_window: int

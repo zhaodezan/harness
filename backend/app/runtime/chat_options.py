@@ -31,8 +31,11 @@ def chat_options(connection, state, agent=None):
     for tool in state.tool_registry.list():
         tool_id = tool.get("plugin_id") or ""
         if tool_id in local_ids or tool_id.startswith('dify:'):
-            if not tool_id.startswith('dify:') or agent is not None and tool_id in selected_dify_tools:
-                options["local_tools"].append({"id": tool_id, "name": tool["name"]})
+            if not tool_id.startswith('dify:') or agent is None or tool_id in selected_dify_tools:
+                options["local_tools"].append({
+                    "id": tool_id, "name": tool["name"],
+                    **({"group": "Dify"} if tool_id.startswith('dify:') else {}),
+                })
         elif tool_id.startswith("mcp:"):
             parts = tool_id.split(":", 2)
             if len(parts) == 3 and parts[1] in mcp_names:

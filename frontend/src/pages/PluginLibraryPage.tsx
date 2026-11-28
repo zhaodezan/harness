@@ -41,6 +41,7 @@ type PluginLibraryPageProps = {
   onConfigure: (agentId: string) => void;
   onCreate: () => void;
   onDelete: (agent: AgentListItem) => void;
+  onCatalogDeleted: () => Promise<void>;
 };
 
 export async function testLocalDocker(update: (status: { testing: boolean; message: string; error: string }) => void) {
@@ -53,7 +54,7 @@ export async function testLocalDocker(update: (status: { testing: boolean; messa
   }
 }
 
-export function PluginLibraryPage({ agents, onConfigure, onCreate, onDelete }: PluginLibraryPageProps) {
+export function PluginLibraryPage({ agents, onConfigure, onCreate, onDelete, onCatalogDeleted }: PluginLibraryPageProps) {
   const [params, setParams] = useSearchParams();
   const activeTab = tabs.includes(params.get('tab') as Tab) ? params.get('tab') as Tab : 'Model';
   const [thirdPartyTab, setThirdPartyTab] = useState<ThirdPartyTab>('Dify');
@@ -185,9 +186,13 @@ export function PluginLibraryPage({ agents, onConfigure, onCreate, onDelete }: P
     finally { setModelTestingId(''); }
   };
   const deleteModel = async (item: ModelConfig) => {
-    if (!window.confirm(`删除 Model「${item.name}」？正在被 Agent 使用的 Model 不能删除。`)) return;
-    try { await api(`/models/${item.id}`, { method: 'DELETE' }); setMessage(`Model「${item.name}」已删除`); await load(); }
-    catch (reason) { setError((reason as Error).message); }
+    if (!window.confirm(`删除 Model「${item.name}」？关联 Agent 的模型将被清空，不会自动更换。Agent 和历史对话会保留。`)) return;
+    setError(''); setMessage('');
+    try {
+      await api(`/models/${item.id}`, { method: 'DELETE' });
+      setMessage(`Model「${item.name}」已删除；关联 Agent 需重新选择模型。`);
+      await Promise.all([load(), onCatalogDeleted()]);
+    } catch (reason) { setError((reason as Error).message); }
   };
 
   const importSkill = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -270,7 +275,15 @@ export function PluginLibraryPage({ agents, onConfigure, onCreate, onDelete }: P
       await load();
     } catch (reason) { setError((reason as Error).message); }
   };
-  const deleteSkill = async (name: string) => { try { await api(`/skills/${encodeURIComponent(name)}`, { method: 'DELETE' }); await load(); } catch (reason) { setError((reason as Error).message); } };
+  const deleteSkill = async (name: string) => {
+    if (!window.confirm(`删除 Skill「${name}」？它将从所有关联 Agent 的已选 Skill 中移除。Agent 和历史对话会保留。`)) return;
+    setError(''); setMessage('');
+    try {
+      await api(`/skills/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      setMessage(`Skill「${name}」已删除，并已解除 Agent 关联。`);
+      await Promise.all([load(), onCatalogDeleted()]);
+    } catch (reason) { setError((reason as Error).message); }
+  };
   const deleteTool = async (id: string) => { try { await api(`/tools/${id}`, { method: 'DELETE' }); await load(); } catch (reason) { setError((reason as Error).message); } };
   const deleteServer = async (id: string) => { try { await api(`/mcp/servers/${id}`, { method: 'DELETE' }); await load(); } catch (reason) { setError((reason as Error).message); } };
 

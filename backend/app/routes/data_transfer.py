@@ -117,7 +117,7 @@ def preview_import(payload: ImportPayload, request: Request):
     warnings = []
     if payload.secrets_included:
         warnings.append("文件声明包含凭据，但出于安全原因不会导入任何密钥。")
-    if payload.models or payload.agents:
+    if payload.models or (payload.format_version == 1 and payload.agents):
         warnings.append("Model API 密钥不会包含在备份中；导入后需在 Model 页重新配置凭据并测试连接。")
     if payload.database_connections:
         warnings.append("备份中的数据库连接不包含密码；恢复后请重新设置凭据并测试。SQLite 文件路径需确认仍有效。")
@@ -157,12 +157,10 @@ def import_data(payload: ImportPayload, request: Request, background_tasks: Back
     imported_database_configs: list[dict] = []
     imported_knowledge_documents = 0
     imported_model_count = 0
-    import_warnings = ["导入的 Model 不包含 API 密钥；请在 Model 页重新配置凭据并测试连接。"] if payload.models or payload.agents else []
+    import_warnings = ["导入的 Model 不包含 API 密钥；请在 Model 页重新配置凭据并测试连接。"] if payload.models or (payload.format_version == 1 and payload.agents) else []
     for agent in payload.agents:
         if not isinstance(agent.get("name"), str) or not agent["name"].strip():
             raise HTTPException(status_code=422, detail="导入文件中的智能体名称无效")
-    if payload.format_version == 2 and not payload.models and payload.agents:
-        raise HTTPException(status_code=422, detail="v2 备份包含 Agent，但没有 Model 配置")
     try:
         with database_connection(request.app.state.database_path) as connection:
             for knowledge_base in payload.knowledge_bases:
@@ -322,9 +320,12 @@ def import_data(payload: ImportPayload, request: Request, background_tasks: Back
                     raise HTTPException(status_code=422, detail="导入文件中的 Skills 设置无效")
                 if payload.format_version == 2:
                     old_model_id = agent.get("model_config_id")
-                    if not isinstance(old_model_id, str) or old_model_id not in model_map:
+                    if "model_config_id" in agent and old_model_id is None:
+                        new_model_id = None
+                    elif isinstance(old_model_id, str) and old_model_id in model_map:
+                        new_model_id = model_map[old_model_id]
+                    else:
                         raise HTTPException(status_code=422, detail="Agent 引用了不存在的 Model 配置")
-                    new_model_id = model_map[old_model_id]
                 else:
                     old_model_id = agent.get("model_config_id")
                     if isinstance(old_model_id, str) and old_model_id in model_map:
@@ -341,8 +342,8 @@ def import_data(payload: ImportPayload, request: Request, background_tasks: Back
                         )
                         imported_model_count += 1
                 connection.execute(
-                    "INSERT INTO agents(id,name,provider,base_url,model,system_prompt,mode,context_window,skill_directory,selected_skills_json,selected_agents_json,sandbox_code_enabled,max_rounds,selected_mcp_tools_json,selected_local_tools_json,selected_knowledge_bases_json,selected_database_connections_json,prompt_variables_json,model_config_id) "
-                    "VALUES(?,?,?,'','',?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO agents(id,name,provider,base_url,model,system_prompt,mode,context_window,skill_directory,selected_skills_json,selected_agents_json,sandbox_code_enabled,max_rounds,selected_mcp_tools_json,selected_local_tools_json,selected_knowledge_bases_json,selected_database_connections_json,prompt_variables_json,model_config_id,model_binding_cleared) "
+                    "VALUES(?,?,?,'','',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (new_agent_id, agent["name"].strip(), agent.get("provider", "openai_compatible"),
                      agent.get("system_prompt", ""), agent.get("mode", "react"),
                      agent.get("context_window", 32768), agent.get("skill_directory", ""),
@@ -350,7 +351,7 @@ def import_data(payload: ImportPayload, request: Request, background_tasks: Back
                      agent.get("max_rounds", 500), json.dumps(selected_mcp), json.dumps(selected_local),
                      json.dumps([knowledge_base_map[item] for item in selected_knowledge_bases]),
                      json.dumps([database_map[item] for item in selected_database_connections]),
-                     json.dumps(agent.get("prompt_variables", {})), new_model_id),
+                     json.dumps(agent.get("prompt_variables", {})), new_model_id, int(new_model_id is None)),
                 )
 
             for new_agent_id, old_targets in selected_agents_by_agent.items():

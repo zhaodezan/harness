@@ -37,15 +37,20 @@ async def import_skill(request: Request, file: UploadFile = File(...)):
 @router.delete("/{skill_name}", status_code=204)
 def delete_skill(skill_name: str, request: Request):
     with database_connection(request.app.state.database_path) as connection:
-        agents = connection.execute("SELECT name, selected_skills_json FROM agents").fetchall()
-    references = [
-        row["name"] for row in agents
-        if skill_name in json.loads(row["selected_skills_json"] or "[]")
-    ]
-    if references:
-        raise HTTPException(status_code=409, detail=f"Skill 正被智能体使用：{', '.join(references)}")
-    if not request.app.state.plugin_store.delete_skill(skill_name):
-        raise HTTPException(status_code=404, detail="Skill 不存在")
+        connection.execute("BEGIN IMMEDIATE")
+        for agent in connection.execute("SELECT id, selected_skills_json FROM agents").fetchall():
+            selected = json.loads(agent["selected_skills_json"] or "[]")
+            if skill_name in selected:
+                connection.execute(
+                    "UPDATE agents SET selected_skills_json=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (json.dumps([name for name in selected if name != skill_name]), agent["id"]),
+                )
+        try:
+            deleted = request.app.state.plugin_store.delete_skill(skill_name)
+        except OSError:
+            raise HTTPException(status_code=500, detail="无法删除 Skill 目录，未更改 Agent 的 Skill 选择") from None
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Skill 不存在")
     return None
 
 

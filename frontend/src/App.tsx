@@ -19,9 +19,11 @@ import { KnowledgeBasePage } from './pages/KnowledgeBasePage';
 import { DatabasePage } from './pages/DatabasePage';
 import { ScheduledTasksPage } from './pages/ScheduledTasksPage';
 import { WorkspacePicker } from './components/WorkspacePicker';
-import type { WorkspaceChoice } from './components/WorkspacePicker';
+import type { WorkspaceChoice, WorkspaceView } from './components/WorkspacePicker';
+import { WorkspaceFileDrawer } from './components/WorkspaceFileDrawer';
+import { MessageContent } from './ChartMessageContent';
 
-type Agent = { id: string; name: string; model: string; model_config_name?: string; mode: string; base_url?: string; system_prompt?: string; context_window?: number; max_rounds?: number; skill_directory?: string; selected_skills?: string[]; prompt_variables?: Record<string, string>; input_rate_per_million?: number | null; output_rate_per_million?: number | null };
+type Agent = { id: string; name: string; model: string | null; model_config_name?: string | null; mode: string; base_url?: string; system_prompt?: string; context_window?: number; max_rounds?: number; skill_directory?: string; selected_skills?: string[]; prompt_variables?: Record<string, string>; input_rate_per_million?: number | null; output_rate_per_million?: number | null };
 type PromptVersion = { id: string; content: string; created_at: string };
 type Session = { id: string; agent_id: string | null; title: string };
 type Message = { id: string; role: string; content: string; run_id?: string; plan?: string; images?: ChatImage[] };
@@ -35,7 +37,7 @@ type MCPTool = { name: string; description: string; risk: string };
 type MCPTransport = 'stdio' | 'sse' | 'streamable_http';
 type MCPServer = { id: string; name: string; transport: string; url: string; command: string; args: string[]; cwd: string; connected: boolean };
 type SkillSummary = { name: string; description: string };
-type StartupStatus = { completed: boolean; agent: { id: string; name: string; model: string } | null };
+type StartupStatus = { completed: boolean; agent: { id: string; name: string; model: string | null } | null };
 type DiagnosticCheck = { name: string; ok: boolean; detail: string };
 type ImportPreview = { payload: Record<string, unknown>; agents: number; sessions: number; messages: number; memories: number; mcp_servers: number; mcp_name_conflicts: string[]; warnings: string[] };
 
@@ -147,6 +149,33 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
   const reportWorkspaceChoice = useCallback((choice: WorkspaceChoice) => setWorkspaceChoice(choice), []);
   const reportWorkspaceReady = useCallback((id: string, ready: boolean) => setWorkspaceStatus({ sessionId: id, ready, epoch }), [epoch]);
   const reportWorkspaceError = useCallback((message: string) => setError(message), []);
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView | null>(null);
+  const [fileDrawerOpen, setFileDrawerOpen] = useState(false);
+  const [fileRequest, setFileRequest] = useState<{ path: string; nonce: number } | null>(null);
+  const [webRequest, setWebRequest] = useState<{ href: string; nonce: number } | null>(null);
+  const fileRequestNonce = useRef(0);
+  const webRequestNonce = useRef(0);
+  const reportWorkspaceView = useCallback((view: WorkspaceView | null) => setWorkspaceView(view), []);
+  const openWorkspaceFile = useCallback((path: string) => {
+    if (!sessionId || workspaceView?.execution_mode !== 'local' || !workspaceView.path) {
+      setError('当前会话没有可浏览的本机工作区。');
+      return;
+    }
+    const nonce = ++fileRequestNonce.current;
+    setFileDrawerOpen(true);
+    setFileRequest({ path, nonce });
+  }, [sessionId, workspaceView]);
+  const openWebLink = useCallback((href: string) => {
+    const nonce = ++webRequestNonce.current;
+    setFileDrawerOpen(true);
+    setWebRequest({ href, nonce });
+  }, []);
+  useEffect(() => {
+    setWorkspaceView(null);
+    setFileDrawerOpen(false);
+    setFileRequest(null);
+    setWebRequest(null);
+  }, [sessionId]);
   const [showSettings, setShowSettings] = useState(false);
   const [setupStep, setSetupStep] = useState(1);
   const [editingAgentId, setEditingAgentId] = useState('');
@@ -649,7 +678,7 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
     <p>{error || (agentsLoaded ? '未找到此智能体' : '正在加载智能体…')}</p>
     <Link to="/chat">返回工作区对话</Link>
   </section> : <>
-      <header className="topbar"><div className="breadcrumb">{activeAgent ? <><span>Agent 专属对话</span> <span>/</span> <strong>{activeAgent.name}</strong></> : <strong>工作区对话</strong>}</div><div className="top-actions"><span className="local-indicator"><i /> 本地运行</span>{!agentId && <button className="icon-button" aria-label="打开模型库" onClick={() => navigate('/plugins?tab=Model')}>⚙</button>}</div></header>
+      <header className="topbar"><div className="breadcrumb">{activeAgent ? <><span>Agent 专属对话</span> <span>/</span> <strong>{activeAgent.name}</strong></> : <strong>工作区对话</strong>}</div><div className="top-actions"><span className="local-indicator"><i /> 本地运行</span>{isChatPage && <button className="file-drawer-toggle" type="button" aria-expanded={fileDrawerOpen} aria-controls="workspace-file-drawer" onClick={() => setFileDrawerOpen((value) => !value)}>▤ 文件</button>}{!agentId && <button className="icon-button" aria-label="打开模型库" onClick={() => navigate('/plugins?tab=Model')}>⚙</button>}</div></header>
       {historyLoading ? <div className="app-page-loading" role="status">{historyError ? <>无法加载对话历史 <button type="button" onClick={() => { setHistoryError(''); setHistoryRetry((n) => n + 1); }}>重试加载历史</button></> : '正在加载对话历史…'}</div> : !messages.length ? <section className="welcome"><div className="welcome-orb"><div className="orb-inner">✳</div><span className="orb-ring ring-one"/><span className="orb-ring ring-two"/></div><div className="eyebrow"><span /> {activeAgent ? 'AGENT CHAT' : 'YOUR PRIVATE AI WORKSPACE'}</div>{activeAgent ? <><h1>你好，我是<em>{activeAgent.name}</em></h1><p className="welcome-copy">在这里开启与此 Agent 的专属对话。<br/>本地对话历史独立保存。</p></> : <><h1>好想法，<em>从这里开始。</em></h1><p className="welcome-copy">一个安静、专注的空间，让想法自然生长。<br/>你的对话与数据，始终留在本地。</p></>}<div className="suggestions"><button onClick={() => setDraft('帮我梳理一个新项目的想法')}><span>✦</span> 梳理一个新想法 <b>↗</b></button><button onClick={() => setDraft('帮我总结今天的工作重点')}><span>◷</span> 整理工作重点 <b>↗</b></button><button onClick={() => setDraft('为我制定一个清晰的行动计划')}><span>⌁</span> 制定行动计划 <b>↗</b></button></div></section> : <section className="conversation">
         {contextSummaries.length > 0 && <details className="context-summary"><summary>上下文整理记录（{contextSummaries.length}）</summary>{contextSummaries.map((summary) => <article key={summary.id}><small>{new Date(summary.created_at).toLocaleString()} · 整理了 {summary.summarized_message_count} 条历史消息</small><p>{summary.summary}</p></article>)}</details>}
         <div className="message-list">{messages.map((message, index) => {
@@ -662,7 +691,7 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
                 loading={currentTrace?.loading} error={currentTrace?.error} onRetry={() => setTraceRefresh((n) => n + 1)}>
                 {message.plan && <div className="plan-card"><div className="plan-heading"><span>◇</span><strong>执行计划</strong></div><pre>{message.plan}</pre></div>}
               </RunTracePanel>}
-              <div className="message-content">{message.content || (busy && index === messages.length - 1 ? <span className="typing"><i/><i/><i/></span> : '')}</div>
+              <div className="message-content">{message.content ? <MessageContent content={message.content} onWorkspaceFile={openWorkspaceFile} onWebLink={openWebLink}/> : (busy && index === messages.length - 1 ? <span className="typing"><i/><i/><i/></span> : '')}</div>
               {assistant && <ChatImages images={message.images}/>}
               {message.role === 'user' && !busy && <button className="branch-message" type="button" onClick={() => { setBranchMessageId(message.id); setDraft(message.content); }}>编辑并从此处分支 ↗</button>}
               {assistant && !busy && message.content && <button className="branch-message" type="button" onClick={() => {
@@ -692,14 +721,14 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
             <div className="send-tools">
               <span className="enter-hint">Enter 发送</span>
               <ChatModelPicker key={composerKey} models={modelState.data} model={preference?.model}
-                defaultName={activeAgent?.model_config_name || activeAgent?.model} onChange={(model) => updateComposer({ model })}
+                defaultName={activeAgent?.model_config_name || activeAgent?.model || undefined} onChange={(model) => updateComposer({ model })}
                 loading={modelState.loading} error={modelState.error} refresh={() => setModelRefresh((n) => n + 1)} disabled={busy || creatingSession}/>
               <button className={`send-button ${busy ? 'stop-button' : ''}`} type={busy ? 'button' : 'submit'} onClick={busy ? () => activeController.current?.abort() : undefined} disabled={!busy && (!draft.trim() || historyLoading || creatingSession || !workspaceReady)} aria-label={busy ? '停止运行' : '发送'}>{busy ? '■' : '↑'}</button>
             </div>
           </div>
         </form>
         {isChatPage && <WorkspacePicker sessionId={sessionId} disabled={busy || creatingSession}
-          onChoice={reportWorkspaceChoice} onError={reportWorkspaceError} onReady={reportWorkspaceReady}/>}
+          onChoice={reportWorkspaceChoice} onError={reportWorkspaceError} onReady={reportWorkspaceReady} onWorkspace={reportWorkspaceView}/>}
         <div className="composer-caption">模型输出可能有误，重要信息请自行核实。</div>
       </div>
       <footer className="footer"><span>BUILT FOR THOUGHTFUL WORK</span><span>隐私优先 <i/> 本地存储</span></footer>
@@ -728,13 +757,13 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
       </div>
       {!agentId && <div className="sidebar-bottom"><div className="avatar">A</div><div className="profile"><strong>本地工作区</strong><span>个人空间</span></div><button className="icon-button" aria-label="设置" onClick={() => navigate('/plugins?tab=Model')}>⚙</button></div>}
     </aside>
-    <main className="main-panel">
+    <main className={`main-panel${fileDrawerOpen && isChatPage ? ' file-drawer-open' : ''}`}>
       <Routes>
         <Route path="/" element={<Navigate to="/chat" replace/>}/>
         <Route path="/agents" element={<AgentListPage agents={agents} onConfigure={(id) => navigate(`/agents/${id}/config`)} onCreate={() => navigate('/agents/new')} onDelete={deleteAgent}/>}/>
         <Route path="/agents/new" element={<AgentConfigPage onSaved={saveAgentToList}/>}/>
         <Route path="/agents/:agentId/config" element={<AgentConfigPage onSaved={saveAgentToList}/>}/>
-        <Route path="/plugins" element={<PluginLibraryPage agents={agents} onConfigure={(id) => navigate(`/agents/${id}/config`)} onCreate={() => navigate('/agents/new')} onDelete={deleteAgent}/>}/>
+        <Route path="/plugins" element={<PluginLibraryPage agents={agents} onConfigure={(id) => navigate(`/agents/${id}/config`)} onCreate={() => navigate('/agents/new')} onDelete={deleteAgent} onCatalogDeleted={() => loadAgents()}/>}/>
         <Route path="/knowledge-bases" element={<KnowledgeBasePage/>}/>
         <Route path="/databases" element={<DatabasePage/>}/>
         <Route path="/scheduled-tasks" element={<ScheduledTasksPage/>}/>
@@ -742,6 +771,7 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
         <Route path="/agents/:agentId/chat" element={chatPage}/>
         <Route path="*" element={<Navigate to="/" replace/>}/>
       </Routes>
+      {isChatPage && <WorkspaceFileDrawer sessionId={sessionId} open={fileDrawerOpen} executionMode={workspaceView?.execution_mode ?? workspaceChoice.execution_mode} workspacePath={workspaceView?.path} fileRequest={fileRequest} webRequest={webRequest} onClose={() => setFileDrawerOpen(false)} onError={reportWorkspaceError}/>}
     </main>
 
     {showSettings && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowSettings(false); }}><form className="settings-card" onSubmit={createAgent}><button type="button" className="modal-close" onClick={() => setShowSettings(false)}>×</button><div className="eyebrow">{editingAgentId ? '智能体设置' : '开始使用'}</div><h2>{editingAgentId ? '编辑智能体' : '配置你的智能体'}</h2><p>{editingAgentId ? '调整智能体配置。' : '两步完成设置，API 密钥仅保存在本机。'}</p>

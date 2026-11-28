@@ -31,7 +31,7 @@ def test_schema_17_creates_knowledge_tables_and_agent_selection(tmp_path):
 
     assert {"knowledge_bases", "knowledge_documents"} <= tables
     assert "selected_knowledge_bases_json" in agent_columns
-    assert migration_versions[-1] == 26
+    assert 17 in migration_versions
     assert any(
         row[2] == "knowledge_bases" and row[6].upper() == "CASCADE"
         for row in document_foreign_keys

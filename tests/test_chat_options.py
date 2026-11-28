@@ -27,6 +27,19 @@ def invoke(tool, arguments, id='call'):
     return sse({'tool_calls': [{'index': 0, 'id': id, 'function': {'name': tool, 'arguments': json.dumps(arguments)}}]})
 
 
+def test_workspace_catalog_exposes_dify_tools_for_explicit_selection(tmp_path):
+    app = create_app(tmp_path / 'db.sqlite', data_dir=tmp_path / 'data', secret_store=Secrets())
+    tool_id = 'dify:sample/echo:1.2.3:' + 'a' * 32 + ':echo:echo'
+    app.state.tool_registry.register(ToolDefinition(
+        'dify_echo', 'Dify Echo', {'type': 'object', 'properties': {}}, 'side_effect', lambda _: 'ok', tool_id,
+    ))
+    with TestClient(app) as client:
+        catalog = client.get('/api/sessions/chat-options')
+        assert catalog.status_code == 200, catalog.text
+        assert catalog.json()['options']['local_tools'] == [{'id': tool_id, 'name': 'dify_echo', 'group': 'Dify'}]
+        assert catalog.json()['defaults']['local_tools'] == []
+
+
 def test_chat_catalog_selection_is_optional_and_does_not_rewrite_agent(tmp_path):
     requests, executed = [], []
 

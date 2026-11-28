@@ -96,15 +96,40 @@ def test_import_rejects_corrupt_zip(tmp_path):
     assert response.status_code == 400
 
 
-def test_cannot_delete_skill_selected_by_an_agent(tmp_path):
+def test_delete_skill_removes_only_its_agent_selections(tmp_path):
     archive = make_zip({"summarize/SKILL.md": VALID_SKILL})
     with skill_client(tmp_path) as (client, _data_dir):
-        client.post("/api/skills/import", files={"file": ("skill.zip", archive, "application/zip")})
-        create_test_agent(client, {"name": "Uses Skill", "selected_skills": ["summarize"]})
+        files = {"file": ("skill.zip", archive, "application/zip")}
+        assert client.post("/api/skills/import", files=files).status_code == 201
+        agents = [create_test_agent(client, {"name": name, "selected_skills": selected}).json()
+                  for name, selected in [("First", ["other", "summarize", "tail"]),
+                                         ("Second", ["summarize"]), ("Unrelated", ["other"])]]
         response = client.delete("/api/skills/summarize")
-        listed = client.get("/api/skills").json()
-    assert response.status_code == 409
-    assert [skill["name"] for skill in listed] == ["summarize"]
+        assert response.status_code == 204, response.text
+        assert client.get("/api/skills").json() == []
+        assert client.post("/api/skills/import", files=files).status_code == 201
+        restored = {agent["id"]: agent["selected_skills"] for agent in client.get("/api/agents").json()}
+        assert restored == {agents[0]["id"]: ["other", "tail"], agents[1]["id"]: [], agents[2]["id"]: ["other"]}
+
+
+def test_deleting_missing_skill_does_not_change_agent_selections(tmp_path):
+    with skill_client(tmp_path) as (client, _):
+        agent = create_test_agent(client, {"name": "Agent", "selected_skills": ["summarize"]}).json()
+        assert client.delete("/api/skills/summarize").status_code == 404
+        assert client.get(f"/api/agents/{agent['id']}").json()["selected_skills"] == ["summarize"]
+
+
+def test_skill_removal_failure_keeps_agent_selections(tmp_path, monkeypatch):
+    def fail_delete(_name):
+        raise PermissionError("cannot remove directory")
+
+    with skill_client(tmp_path) as (client, _):
+        files = {"file": ("skill.zip", make_zip({"summarize/SKILL.md": VALID_SKILL}))}
+        assert client.post("/api/skills/import", files=files).status_code == 201
+        agent = create_test_agent(client, {"name": "Agent", "selected_skills": ["summarize"]}).json()
+        monkeypatch.setattr(client.app.state.plugin_store, "delete_skill", fail_delete)
+        assert client.delete("/api/skills/summarize").status_code == 500
+        assert client.get(f"/api/agents/{agent['id']}").json()["selected_skills"] == ["summarize"]
 
 
 def test_import_rejects_expanded_archive_over_ten_megabytes(tmp_path):

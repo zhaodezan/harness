@@ -3,12 +3,13 @@ import { api, ApiError } from '../api';
 import './WorkspacePicker.css';
 
 export type WorkspaceChoice = { group_id: string | null; execution_mode: 'local' | 'sandbox' };
-type WorkspaceView = WorkspaceChoice & { name: string | null; path: string | null };
+export type WorkspaceView = WorkspaceChoice & { name: string | null; path: string | null };
 type WorkspaceGroup = { id: string; name: string; path: string };
 type SandboxStatus = { configured: boolean };
 
 const DEFAULT_CHOICE: WorkspaceChoice = { group_id: null, execution_mode: 'local' };
 const ignoreReady = () => {};
+const ignoreWorkspace = () => {};
 
 class WorkspaceOutcomeUncertain extends Error {
   constructor() {
@@ -59,9 +60,10 @@ type Props = {
   onChoice: (choice: WorkspaceChoice) => void;
   onError: (message: string) => void;
   onReady?: (sessionId: string, ready: boolean) => void;
+  onWorkspace?: (workspace: WorkspaceView | null) => void;
 };
 
-export function WorkspacePicker({ sessionId, disabled, onChoice, onError, onReady = ignoreReady }: Props) {
+export function WorkspacePicker({ sessionId, disabled, onChoice, onError, onReady = ignoreReady, onWorkspace = ignoreWorkspace }: Props) {
   const [groups, setGroups] = useState<WorkspaceGroup[]>([]);
   const [choice, setChoice] = useState<WorkspaceChoice>(DEFAULT_CHOICE);
   const [workspace, setWorkspace] = useState<WorkspaceView | null>(null);
@@ -115,6 +117,7 @@ export function WorkspacePicker({ sessionId, disabled, onChoice, onError, onRead
     setBusy(false);
     applyInFlight.current = false;
     setWorkspace(null);
+    onWorkspace(null);
     setLoadedSessionId('');
     setWorkspaceLoadError('');
     if (!sessionId) {
@@ -133,6 +136,7 @@ export function WorkspacePicker({ sessionId, disabled, onChoice, onError, onRead
       .then((value) => {
         if (!value || controller.signal.aborted || !isCurrent()) return;
         setWorkspace(value);
+        onWorkspace(value);
         setChoice({ group_id: value.group_id, execution_mode: value.execution_mode });
         onChoice({ group_id: value.group_id, execution_mode: value.execution_mode });
         setLoadedSessionId(sessionId);
@@ -148,7 +152,7 @@ export function WorkspacePicker({ sessionId, disabled, onChoice, onError, onRead
       })
       .finally(() => { if (!controller.signal.aborted && isCurrent()) setLoadingWorkspace(false); });
     return () => { controller.abort(); if (isCurrent()) generation.current.advance(); };
-  }, [sessionId, onChoice, onError, onReady, workspaceRetry]);
+  }, [sessionId, onChoice, onError, onReady, onWorkspace, workspaceRetry]);
 
   const apply = async (next: WorkspaceChoice) => {
     if (applyInFlight.current || !workspaceReady || currentSession.current !== sessionId) return;
@@ -170,6 +174,7 @@ export function WorkspacePicker({ sessionId, disabled, onChoice, onError, onRead
       }));
       if (!isCurrent()) return;
       setWorkspace(value);
+      onWorkspace(value);
       onError('');
     } catch (reason) {
       if (!isCurrent()) return;

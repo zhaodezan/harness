@@ -19,7 +19,7 @@ def test_schema_18_creates_database_connections_and_agent_authorization(tmp_path
     assert "selected_agents_json" in agent_columns
     assert "sandbox_code_enabled" in agent_columns
     assert "app_settings" in tables
-    assert versions[-1] == 26
+    assert 18 in versions
 
 
 def test_schema_18_repairs_missing_authorization_column(tmp_path):

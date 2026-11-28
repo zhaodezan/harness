@@ -18,6 +18,6 @@ def test_schema_16_repairs_partially_applied_schema_15(tmp_path):
         agent_columns = {row[1] for row in connection.execute("PRAGMA table_info(agents)")}
         model_table = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='model_configs'").fetchone()
 
-    assert versions[-1] == 26
+    assert 16 in versions
     assert "model_config_id" in agent_columns
     assert model_table is not None

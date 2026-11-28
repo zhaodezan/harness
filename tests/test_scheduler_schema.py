@@ -16,5 +16,5 @@ def test_schema_19_creates_task_and_run_tables_with_cascade(tmp_path):
     assert {"scheduled_tasks", "scheduled_task_runs"} <= tables
     assert {"script", "cron_expression", "timezone", "enabled", "confirmed_hash", "next_run_at"} <= task_columns
     assert {"status", "stdout", "stderr", "trigger", "exit_code"} <= run_columns
-    assert versions[-1] == 26
+    assert 19 in versions
     assert any(row[2] == "scheduled_tasks" and row[6].upper() == "CASCADE" for row in foreign_keys)

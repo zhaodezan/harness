@@ -75,6 +75,25 @@ def test_v1_backup_with_inline_agent_model_creates_model_profile(tmp_path):
     assert "credential" in " ".join(imported.json()["warnings"]).lower() or "凭据" in " ".join(imported.json()["warnings"])
 
 
+def test_v2_backup_round_trips_agent_without_model(tmp_path):
+    database = tmp_path / "no-model.sqlite3"
+    app = create_app(database, data_dir=tmp_path / "data", secret_store=MemorySecrets())
+    payload = {
+        "format_version": 2, "models": [],
+        "agents": [{"id": "former-agent", "name": "Unconfigured", "model_config_id": None}],
+        "sessions": [], "messages": [],
+    }
+    with TestClient(app) as client:
+        response = client.post("/api/data/import", json=payload)
+        assert response.status_code == 200, response.text
+        exported = client.get("/api/data/export").json()
+        assert exported["agents"][0]["model_config_id"] is None
+        assert exported["models"] == []
+    with TestClient(app) as restarted:
+        assert restarted.get("/api/agents").json()[0]["model_config_id"] is None
+        assert restarted.get("/api/models").json() == []
+
+
 def test_v2_backup_rejects_agent_reference_to_missing_model(tmp_path):
     with TestClient(create_app(tmp_path / "invalid-import.sqlite3", data_dir=tmp_path / "data")) as client:
         response = client.post("/api/data/import", json={

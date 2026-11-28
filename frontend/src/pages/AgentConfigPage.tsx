@@ -7,9 +7,9 @@ import { DifyToolChoices } from '../../../backend/app/dify_plugins/ui/DifyPlugin
 type Agent = {
   id: string;
   name: string;
-  model_config_id?: string;
-  model_config_name?: string;
-  model: string;
+  model_config_id?: string | null;
+  model_config_name?: string | null;
+  model: string | null;
   mode: string;
   system_prompt?: string;
   context_window?: number;
@@ -171,7 +171,7 @@ export function AgentConfigPage({ onSaved }: AgentConfigPageProps) {
     let cancelled = false;
     if (!editingAgentId || loading || !hydrated.current) return;
     const payload = {
-      name: agentName, model_config_id: modelConfigId, mode, system_prompt: systemPrompt,
+      name: agentName, ...(modelConfigId ? { model_config_id: modelConfigId } : {}), mode, system_prompt: systemPrompt,
       context_window: contextWindow, selected_skills: selectedSkills,
       selected_mcp_tools: selectedMcpTools, selected_local_tools: selectedLocalTools,
       selected_knowledge_bases: selectedKnowledgeBases,
@@ -266,7 +266,7 @@ export function AgentConfigPage({ onSaved }: AgentConfigPageProps) {
   const saveNow = async (): Promise<boolean> => {
     if (!editingAgentId) return true;
     const payload = {
-      name: agentName, model_config_id: modelConfigId, mode, system_prompt: systemPrompt,
+      name: agentName, ...(modelConfigId ? { model_config_id: modelConfigId } : {}), mode, system_prompt: systemPrompt,
       context_window: contextWindow, selected_skills: selectedSkills,
       selected_mcp_tools: selectedMcpTools, selected_local_tools: selectedLocalTools,
       selected_knowledge_bases: selectedKnowledgeBases,
@@ -326,7 +326,7 @@ export function AgentConfigPage({ onSaved }: AgentConfigPageProps) {
           </> : <>
             {isNew && <div className="setup-connection-summary"><span>模型：{modelConfigs.find((item) => item.id === modelConfigId)?.name ?? '未选择'}</span><button type="button" onClick={() => setSetupStep(1)}>更换模型</button></div>}
             <label>智能体名称<input value={agentName} onChange={(event) => setAgentName(event.target.value)} required/></label>
-            {editingAgentId && <label>使用模型<select value={modelConfigId} onChange={(event) => setModelConfigId(event.target.value)} required><option value="">请选择模型</option>{modelConfigs.map((item) => <option key={item.id} value={item.id}>{item.name}{!item.credential_configured ? '（缺少凭据）' : ''}</option>)}</select><small className="plugin-helper">共享模型的地址、型号或密钥变更会应用到所有关联智能体。</small><button className="inline-link-button" type="button" onClick={() => navigate('/plugins?tab=Model')}>管理模型</button></label>}
+            {editingAgentId && <label>使用模型<select value={modelConfigId} onChange={(event) => setModelConfigId(event.target.value)} required><option value="">请选择模型</option>{modelConfigs.map((item) => <option key={item.id} value={item.id}>{item.name}{!item.credential_configured ? '（缺少凭据）' : ''}</option>)}</select><small className="plugin-helper">{modelConfigId ? '共享模型的地址、型号或密钥变更会应用到所有关联智能体。' : '尚未配置模型。请选择一个已测试的模型以恢复默认对话。'}</small><button className="inline-link-button" type="button" onClick={() => navigate('/plugins?tab=Model')}>管理模型</button></label>}
             <label>运行方式<select value={mode} onChange={(event) => setMode(event.target.value as 'react' | 'plan_execute')}><option value="react">灵感对话（默认）</option><option value="plan_execute">计划并执行</option></select></label>
             <label>上下文窗口（Token）<input type="number" min={1024} max={2000000} step={1024} value={contextWindow} onChange={(event) => setContextWindow(Number(event.target.value))}/></label>
             <label>最大模型轮次（单次请求）<input type="number" min={-1} max={10000} step={1} value={maxRounds} onChange={(event) => setMaxRounds(Number(event.target.value))}/><small>-1 表示不限，持续运行直到手动停止；默认 500。</small></label>
@@ -338,13 +338,13 @@ export function AgentConfigPage({ onSaved }: AgentConfigPageProps) {
             <label className="skill-choice"><input type="checkbox" checked={sandboxCodeEnabled} onChange={(event) => setSandboxCodeEnabled(event.target.checked)}/><span><strong>允许生成并执行 Python 代码</strong><small>可在对话中选择全部允许或用户审批。运行位置可选择本机工作分组或 Docker 沙箱；本机代码不是沙箱。</small></span></label>
             <div className="skill-choice-list"><small>为此智能体启用已加载的 Skills。</small>{skillChoices.map((skill) => <label key={skill.name} className="skill-choice"><input type="checkbox" checked={selectedSkills.includes(skill.name)} onChange={(event) => setSelectedSkills((items) => event.target.checked ? [...items, skill.name] : items.filter((name) => name !== skill.name))}/><span><strong>{skill.name}</strong><small>{skill.description}</small></span></label>)}{!skillChoices.length && <small>暂无已加载 Skill。请先在插件库导入 ZIP。</small>}</div>
             <div className="skill-choice-list"><small>启用后，MCP 工具可由模型直接调用，不逐次审批。</small>{mcpChoices.map((tool) => <label key={tool.id} className="skill-choice"><input type="checkbox" checked={selectedMcpTools.includes(tool.id)} onChange={(event) => setSelectedMcpTools((items) => event.target.checked ? [...items, tool.id] : items.filter((id) => id !== tool.id))}/><span><strong>{tool.name}</strong><small>{tool.description} · {tool.risk === 'read_only' ? '只读' : '可能修改数据'}</small></span></label>)}{!mcpChoices.length && <small>暂无已连接 MCP 工具。请在插件库配置并连接。</small>}</div>
-            <DifyToolChoices selected={selectedLocalTools} onChange={setSelectedLocalTools}/>
             <div className="skill-choice-list"><small>为此智能体启用本地 Python Tools。</small>{localToolChoices.map((tool) => <label key={tool.id} className="skill-choice"><input type="checkbox" checked={selectedLocalTools.includes(tool.id)} onChange={(event) => setSelectedLocalTools((items) => event.target.checked ? [...items, tool.id] : items.filter((id) => id !== tool.id))}/><span><strong>{tool.name}</strong><small>{tool.description} · {tool.risk === 'read_only' ? '只读' : '需批准'}</small></span></label>)}{!localToolChoices.length && <small>暂无已加载 Tool。请先在插件库导入或编写。</small>}</div>
+            <DifyToolChoices selected={selectedLocalTools} onChange={setSelectedLocalTools}/>
             <div className="skill-choice-list"><small>为此智能体授权知识库；授权后会自动检索相关内容。</small>{knowledgeBaseChoices.map((knowledgeBase) => <label key={knowledgeBase.id} className="skill-choice"><input type="checkbox" checked={selectedKnowledgeBases.includes(knowledgeBase.id)} onChange={(event) => setSelectedKnowledgeBases((items) => event.target.checked ? [...items, knowledgeBase.id] : items.filter((id) => id !== knowledgeBase.id))}/><span><strong>{knowledgeBase.name}</strong><small>{knowledgeBase.document_count} 个文档 · {knowledgeBase.status === 'has_errors' ? '包含解析失败文档' : '可用'}</small></span></label>)}{!knowledgeBaseChoices.length && <small>暂无知识库。请先在知识库页面导入资料。</small>}</div>
             <div className="skill-choice-list"><small>为此智能体授权数据库连接；只读连接禁止写入，变更连接仍需逐次审批。</small>{databaseChoices.map((database) => <label key={database.id} className="skill-choice"><input type="checkbox" checked={selectedDatabaseConnections.includes(database.id)} onChange={(event) => setSelectedDatabaseConnections((items) => event.target.checked ? [...items, database.id] : items.filter((id) => id !== database.id))}/><span><strong>{database.name}</strong><small>{database.db_type.toUpperCase()} · {database.readonly ? '只读' : '写操作逐次审批'} · {database.last_tested_at ? '已测试' : '未测试'}{database.db_type === 'mysql' && !database.password_configured ? ' · 缺少密码' : ''}</small></span></label>)}{!databaseChoices.length && <small>暂无数据库连接。请添加并测试连接。</small>}<button type="button" className="inline-link-button" onClick={() => navigate('/databases')}>管理数据库连接</button></div>
 
             {editingAgentId && promptVersions.length > 0 && <details className="prompt-history"><summary>历史版本（{promptVersions.length}）</summary>{promptVersions.map((version) => <div className="prompt-version" key={version.id}><span>{version.content || '（空提示词）'}<small>{new Date(version.created_at).toLocaleString()}</small></span><button type="button" onClick={() => restorePrompt(version.id)}>恢复</button></div>)}</details>}
-            {editingAgentId && <div className="connection-row"><button type="button" onClick={testAgentConnection}>测试关联模型</button><small>{connectionStatus}</small></div>}
+            {editingAgentId && <div className="connection-row"><button type="button" disabled={!modelConfigId} onClick={testAgentConnection}>测试关联模型</button><small>{connectionStatus}</small></div>}
             <div className="wizard-actions">{editingAgentId && <span className={`save-indicator ${saveStatus}`}>{saveStatus === 'saving' ? '保存中…' : saveStatus === 'saved' ? '已自动保存' : saveStatus === 'error' ? '保存失败' : '自动保存已开启'}</span>}{saveStatus === 'error' && <button type="button" className="secondary-button" onClick={() => setSaveRevision((revision) => revision + 1)}>重试保存</button>}{isNew && <button type="button" className="secondary-button" onClick={() => setSetupStep(1)}>上一步</button>}{isNew && <button className="primary-button" type="button" disabled={!modelConfigId} onClick={() => void createAgent()}>创建智能体 <span>→</span></button>}</div>
           </>}
         </form>

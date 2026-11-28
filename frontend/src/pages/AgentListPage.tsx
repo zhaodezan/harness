@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 export type AgentListItem = {
   id: string;
   name: string;
-  model: string;
+  model: string | null;
   mode: string;
 };
 

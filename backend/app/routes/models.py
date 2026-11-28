@@ -254,16 +254,12 @@ async def test_model_connection(model_id: str, request: Request):
 @router.delete("/{model_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_model(model_id: str, request: Request):
     with database_connection(request.app.state.database_path) as connection:
-        model = connection.execute("SELECT name FROM model_configs WHERE id=?", (model_id,)).fetchone()
-        if model is None:
+        connection.execute(
+            "UPDATE agents SET model_config_id=NULL, model_binding_cleared=1, updated_at=CURRENT_TIMESTAMP "
+            "WHERE model_config_id=?", (model_id,),
+        )
+        if connection.execute("DELETE FROM model_configs WHERE id=?", (model_id,)).rowcount == 0:
             raise HTTPException(status_code=404, detail="Model 配置不存在")
-        references = connection.execute(
-            "SELECT name FROM agents WHERE model_config_id=? ORDER BY name", (model_id,)
-        ).fetchall()
-        if references:
-            names = ", ".join(row["name"] for row in references)
-            raise HTTPException(status_code=409, detail=f"Model 正被以下 Agent 使用：{names}")
-        connection.execute("DELETE FROM model_configs WHERE id=?", (model_id,))
     try:
         request.app.state.secret_store.delete(f"model:{model_id}:api_key")
     except Exception:

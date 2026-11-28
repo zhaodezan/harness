@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.db import database_connection
 from backend.app.main import create_app
+from model_test_utils import create_test_model
 
 
 class MemorySecrets:
@@ -79,23 +80,36 @@ def test_model_update_test_connection_and_credential_rotation(tmp_path):
     assert secrets.get(f"model:{created['id']}:api_key") == "new-key"
 
 
-def test_model_delete_is_blocked_when_agent_references_it(tmp_path):
-    app = create_app(tmp_path / "model-ref.sqlite3", data_dir=tmp_path / "data", secret_store=MemorySecrets(), http_transport=successful_transport())
+def test_model_delete_unbinds_agents_keeps_history_and_allows_rebinding(tmp_path):
+    secrets = MemorySecrets()
+    app = create_app(tmp_path / "model-ref.sqlite3", data_dir=tmp_path / "data", secret_store=secrets)
     with TestClient(app) as client:
-        model = client.post("/api/models", json={
-            "name": "Primary", "base_url": "https://example.test/v1", "model": "model-a", "api_key": "key",
-        }).json()
+        model = create_test_model(client)
+        other = create_test_model(client)
+        first, second, unrelated = [client.post("/api/agents", json={
+            "name": name, "model_config_id": model_id,
+        }).json()["id"] for name, model_id in [("First", model), ("Second", model), ("Unrelated", other)]]
+        session = client.post("/api/sessions", json={"agent_id": first}).json()["id"]
         with database_connection(app.state.database_path) as connection:
-            connection.execute("UPDATE model_configs SET last_tested_at=CURRENT_TIMESTAMP WHERE id=?", (model["id"],))
-        agent = client.post("/api/agents", json={
-            "name": "Uses model", "model_config_id": model["id"],
-        }).json()
-        deleted = client.delete(f"/api/models/{model['id']}")
-        remaining = client.get("/api/models").json()
+            connection.execute("INSERT INTO messages(id,session_id,role,content) VALUES('before',?,'user','Prior message')", (session,))
+        deleted = client.delete(f"/api/models/{model}")
+        assert deleted.status_code == 204, deleted.text
+        assert secrets.get(f"model:{model}:api_key") is None
+        agents = {agent["id"]: agent["model_config_id"] for agent in client.get("/api/agents").json()}
+        assert agents == {first: None, second: None, unrelated: other}
+        assert [message["content"] for message in client.get(f"/api/sessions/{session}/messages").json()] == ["Prior message"]
+        blocked = client.post(f"/api/sessions/{session}/messages", json={"content": "Continue"})
+        assert blocked.status_code == 409
+        assert "配置有效的 Model" in blocked.json()["detail"]
+        renamed = client.patch(f"/api/agents/{second}", json={"name": "Renamed without model"})
+        assert renamed.status_code == 200 and renamed.json()["model_config_id"] is None
+        rebound = client.patch(f"/api/agents/{first}", json={"model_config_id": other})
+        assert rebound.status_code == 200 and rebound.json()["model_config_id"] == other
 
-    assert deleted.status_code == 409
-    assert "Uses model" in deleted.json()["detail"]
-    assert len(remaining) == 1
+    with TestClient(app) as restarted:
+        agent = restarted.get(f"/api/agents/{second}").json()
+        assert agent["model_config_id"] is None and agent["model"] is None and agent["model_config_name"] is None
+        assert [item["id"] for item in restarted.get("/api/models").json()] == [other]
 
 
 def test_model_delete_clears_unreferenced_credential(tmp_path):

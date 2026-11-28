@@ -204,6 +204,7 @@ def update_agent(
             raise HTTPException(status_code=422, detail="请提供有效的更新内容")
         if "model_config_id" in updates and updates["model_config_id"] != current["model_config_id"]:
             _validate_model_assignment(connection, updates["model_config_id"], request)
+            updates["model_binding_cleared"] = 0
         assignments = ", ".join(f"{field} = ?" for field in updates)
         values = [*updates.values(), agent_id]
         cursor = connection.execute(

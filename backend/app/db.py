@@ -4,7 +4,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 
 
 def connect_database(database_path: str | Path) -> sqlite3.Connection:
@@ -513,6 +513,16 @@ def initialize_database(database_path: str | Path) -> None:
             if connection.execute("SELECT 1 FROM schema_migrations WHERE version=26").fetchone() is None:
                 connection.execute("ALTER TABLE agents ADD COLUMN max_rounds INTEGER NOT NULL DEFAULT 500 CHECK (max_rounds = -1 OR max_rounds BETWEEN 1 AND 10000)")
                 connection.execute("INSERT INTO schema_migrations(version) VALUES (26)")
+            connection.commit()
+
+        if 27 not in applied:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("SELECT 1 FROM schema_migrations WHERE version=27").fetchone() is None:
+                connection.execute(
+                    "ALTER TABLE agents ADD COLUMN model_binding_cleared INTEGER NOT NULL DEFAULT 0 "
+                    "CHECK (model_binding_cleared IN (0, 1))"
+                )
+                connection.execute("INSERT INTO schema_migrations(version) VALUES (27)")
             connection.commit()
 
 

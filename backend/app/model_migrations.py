@@ -11,7 +11,8 @@ def migrate_legacy_models(database_path: str | Path, secret_store: SecretStore) 
     warnings: list[str] = []
     with database_connection(database_path) as connection:
         agents = connection.execute(
-            "SELECT id,name,base_url,model,model_config_id FROM agents ORDER BY rowid"
+            # A cleared binding is intentional, not a pending legacy migration.
+            "SELECT id,name,base_url,model,model_config_id FROM agents WHERE model_binding_cleared=0 ORDER BY rowid"
         ).fetchall()
         for agent in agents:
             legacy = connection.execute(

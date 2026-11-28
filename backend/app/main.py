@@ -50,6 +50,7 @@ from backend.app.routes.knowledge_bases import router as knowledge_bases_router
 from backend.app.routes.memories import router as memories_router
 from backend.app.routes.sessions import router as sessions_router
 from backend.app.routes.workspaces import router as workspaces_router
+from backend.app.routes.workspace_files import router as workspace_files_router
 from backend.app.secrets import SecretStore, SystemSecretStore
 from backend.app.dify_plugins.docker import DockerRunner
 from backend.app.dify_plugins.manager import DifyPluginManager
@@ -270,6 +271,7 @@ def create_app(
     application.include_router(sessions_router)
     application.include_router(chat_images_router)
     application.include_router(workspaces_router)
+    application.include_router(workspace_files_router)
     application.include_router(logs_router)
     application.include_router(sandbox_router)
     application.include_router(knowledge_bases_router)
