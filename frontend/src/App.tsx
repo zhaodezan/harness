@@ -1,4 +1,4 @@
-import { ChangeEvent, FormEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { ChangeEvent, FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import { Link, matchPath, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { parseEnvironmentLines } from './environment';
@@ -22,6 +22,7 @@ import { WorkspacePicker } from './components/WorkspacePicker';
 import type { WorkspaceChoice, WorkspaceView } from './components/WorkspacePicker';
 import { WorkspaceFileDrawer } from './components/WorkspaceFileDrawer';
 import { MessageContent } from './ChartMessageContent';
+import { shouldFollowChatBottom } from './chatScroll';
 
 type Agent = { id: string; name: string; model: string | null; model_config_name?: string | null; mode: string; base_url?: string; system_prompt?: string; context_window?: number; max_rounds?: number; skill_directory?: string; selected_skills?: string[]; prompt_variables?: Record<string, string>; input_rate_per_million?: number | null; output_rate_per_million?: number | null };
 type PromptVersion = { id: string; content: string; created_at: string };
@@ -106,6 +107,9 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
   const [historyError, setHistoryError] = useState('');
   const [historyRetry, setHistoryRetry] = useState(0);
   const [messages, setMessages] = useState<Message[]>([]);
+  const conversationRef = useRef<HTMLElement | null>(null);
+  const shouldStickToBottom = useRef(true);
+  const forceNextBottomScroll = useRef(true);
   const [contextSummaries, setContextSummaries] = useState<ContextSummary[]>([]);
   const [liveTrace, setLiveTrace] = useState<SessionTrace | null>(null);
   const [savedTrace, setSavedTrace] = useState<(SessionTrace & { loading: boolean; error: boolean }) | null>(null);
@@ -149,6 +153,19 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
   const reportWorkspaceChoice = useCallback((choice: WorkspaceChoice) => setWorkspaceChoice(choice), []);
   const reportWorkspaceReady = useCallback((id: string, ready: boolean) => setWorkspaceStatus({ sessionId: id, ready, epoch }), [epoch]);
   const reportWorkspaceError = useCallback((message: string) => setError(message), []);
+  useLayoutEffect(() => {
+    forceNextBottomScroll.current = true;
+    shouldStickToBottom.current = true;
+  }, [sessionId]);
+  useLayoutEffect(() => {
+    const element = conversationRef.current;
+    if (!element) return;
+    if (forceNextBottomScroll.current || shouldStickToBottom.current) {
+      element.scrollTop = element.scrollHeight;
+      forceNextBottomScroll.current = false;
+      shouldStickToBottom.current = true;
+    }
+  }, [messages, sessionId]);
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView | null>(null);
   const [fileDrawerOpen, setFileDrawerOpen] = useState(false);
   const [fileRequest, setFileRequest] = useState<{ path: string; nonce: number } | null>(null);
@@ -678,8 +695,11 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
     <p>{error || (agentsLoaded ? '未找到此智能体' : '正在加载智能体…')}</p>
     <Link to="/chat">返回工作区对话</Link>
   </section> : <>
-      <header className="topbar"><div className="breadcrumb">{activeAgent ? <><span>Agent 专属对话</span> <span>/</span> <strong>{activeAgent.name}</strong></> : <strong>工作区对话</strong>}</div><div className="top-actions"><span className="local-indicator"><i /> 本地运行</span>{isChatPage && <button className="file-drawer-toggle" type="button" aria-expanded={fileDrawerOpen} aria-controls="workspace-file-drawer" onClick={() => setFileDrawerOpen((value) => !value)}>▤ 文件</button>}{!agentId && <button className="icon-button" aria-label="打开模型库" onClick={() => navigate('/plugins?tab=Model')}>⚙</button>}</div></header>
-      {historyLoading ? <div className="app-page-loading" role="status">{historyError ? <>无法加载对话历史 <button type="button" onClick={() => { setHistoryError(''); setHistoryRetry((n) => n + 1); }}>重试加载历史</button></> : '正在加载对话历史…'}</div> : !messages.length ? <section className="welcome"><div className="welcome-orb"><div className="orb-inner">✳</div><span className="orb-ring ring-one"/><span className="orb-ring ring-two"/></div><div className="eyebrow"><span /> {activeAgent ? 'AGENT CHAT' : 'YOUR PRIVATE AI WORKSPACE'}</div>{activeAgent ? <><h1>你好，我是<em>{activeAgent.name}</em></h1><p className="welcome-copy">在这里开启与此 Agent 的专属对话。<br/>本地对话历史独立保存。</p></> : <><h1>好想法，<em>从这里开始。</em></h1><p className="welcome-copy">一个安静、专注的空间，让想法自然生长。<br/>你的对话与数据，始终留在本地。</p></>}<div className="suggestions"><button onClick={() => setDraft('帮我梳理一个新项目的想法')}><span>✦</span> 梳理一个新想法 <b>↗</b></button><button onClick={() => setDraft('帮我总结今天的工作重点')}><span>◷</span> 整理工作重点 <b>↗</b></button><button onClick={() => setDraft('为我制定一个清晰的行动计划')}><span>⌁</span> 制定行动计划 <b>↗</b></button></div></section> : <section className="conversation">
+      <header className="topbar"><div className="breadcrumb">{activeAgent ? <><span>Agent 专属对话</span> <span>/</span> <strong>{activeAgent.name}</strong></> : <strong>工作区对话</strong>}</div><div className="top-actions"><span className="local-indicator"><i /> 本地运行</span>{isChatPage && <button className="file-drawer-toggle" type="button" aria-expanded={fileDrawerOpen} aria-controls="workspace-file-drawer" onClick={() => setFileDrawerOpen((value) => !value)}>▤ 文件</button>}</div></header>
+      {historyLoading ? <div className="app-page-loading" role="status">{historyError ? <>无法加载对话历史 <button type="button" onClick={() => { setHistoryError(''); setHistoryRetry((n) => n + 1); }}>重试加载历史</button></> : '正在加载对话历史…'}</div> : !messages.length ? <section className="welcome"><div className="welcome-orb"><div className="orb-inner">✳</div><span className="orb-ring ring-one"/><span className="orb-ring ring-two"/></div><div className="eyebrow"><span /> {activeAgent ? 'AGENT CHAT' : 'YOUR PRIVATE AI WORKSPACE'}</div>{activeAgent ? <><h1>你好，我是<em>{activeAgent.name}</em></h1><p className="welcome-copy">在这里开启与此 Agent 的专属对话。<br/>本地对话历史独立保存。</p></> : <><h1>好想法，<em>从这里开始。</em></h1><p className="welcome-copy">一个安静、专注的空间，让想法自然生长。<br/>你的对话与数据，始终留在本地。</p></>}<div className="suggestions"><button onClick={() => setDraft('帮我梳理一个新项目的想法')}><span>✦</span> 梳理一个新想法 <b>↗</b></button><button onClick={() => setDraft('帮我总结今天的工作重点')}><span>◷</span> 整理工作重点 <b>↗</b></button><button onClick={() => setDraft('为我制定一个清晰的行动计划')}><span>⌁</span> 制定行动计划 <b>↗</b></button></div></section> : <section className="conversation" ref={conversationRef} onScroll={(event) => {
+        const element = event.currentTarget;
+        shouldStickToBottom.current = shouldFollowChatBottom(element.scrollHeight, element.scrollTop, element.clientHeight);
+      }}>
         {contextSummaries.length > 0 && <details className="context-summary"><summary>上下文整理记录（{contextSummaries.length}）</summary>{contextSummaries.map((summary) => <article key={summary.id}><small>{new Date(summary.created_at).toLocaleString()} · 整理了 {summary.summarized_message_count} 条历史消息</small><p>{summary.summary}</p></article>)}</details>}
         <div className="message-list">{messages.map((message, index) => {
           const assistant = message.role === 'assistant';
@@ -758,6 +778,7 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
       {!agentId && <div className="sidebar-bottom"><div className="avatar">A</div><div className="profile"><strong>本地工作区</strong><span>个人空间</span></div><button className="icon-button" aria-label="设置" onClick={() => navigate('/plugins?tab=Model')}>⚙</button></div>}
     </aside>
     <main className={`main-panel${fileDrawerOpen && isChatPage ? ' file-drawer-open' : ''}`}>
+      <div className="route-view">
       <Routes>
         <Route path="/" element={<Navigate to="/chat" replace/>}/>
         <Route path="/agents" element={<AgentListPage agents={agents} onConfigure={(id) => navigate(`/agents/${id}/config`)} onCreate={() => navigate('/agents/new')} onDelete={deleteAgent}/>}/>
@@ -771,6 +792,7 @@ function ScopedApp({ agentId, sessionId, setSessionId, drafts, setDrafts, compos
         <Route path="/agents/:agentId/chat" element={chatPage}/>
         <Route path="*" element={<Navigate to="/" replace/>}/>
       </Routes>
+      </div>
       {isChatPage && <WorkspaceFileDrawer sessionId={sessionId} open={fileDrawerOpen} executionMode={workspaceView?.execution_mode ?? workspaceChoice.execution_mode} workspacePath={workspaceView?.path} fileRequest={fileRequest} webRequest={webRequest} onClose={() => setFileDrawerOpen(false)} onError={reportWorkspaceError}/>}
     </main>
 
