@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../api';
 import { AgentListPage, AgentListItem } from './AgentListPage';
+import { DifyPlugins } from '../../../backend/app/dify_plugins/ui/DifyPlugins';
 
 type Tab = 'Model' | 'Agent' | 'Skill' | 'MCP' | 'Tool' | 'Docker 沙箱' | '第三方插件';
 type ThirdPartyTab = 'Dify' | 'DSH';
@@ -368,7 +369,7 @@ export function PluginLibraryPage({ agents, onConfigure, onCreate, onDelete }: P
     {activeTab === '第三方插件' && <div className="plugin-list third-party-plugin-panel">
       <div className="plugin-list-head"><h2>第三方插件</h2><span className="plugin-helper">第三方平台集成预留入口</span></div>
       <nav className="plugin-tabs" aria-label="第三方插件类型">{(['Dify', 'DSH'] as ThirdPartyTab[]).map((tab) => <button key={tab} className={thirdPartyTab === tab ? 'active' : ''} onClick={() => setThirdPartyTab(tab)}>{tab}</button>)}</nav>
-      <div className="third-party-placeholder"><strong>{thirdPartyTab}</strong><p>暂未实现，后续版本开放。</p></div>
+      {thirdPartyTab === 'Dify' ? <DifyPlugins/> : <div className="third-party-placeholder"><strong>DSH</strong><p>暂未实现，后续版本开放。</p></div>}
     </div>}
   </section>;
 }

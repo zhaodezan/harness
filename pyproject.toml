@@ -21,13 +21,18 @@ dependencies = [
   "sqlglot>=28,<29",
   "croniter>=6,<7",
   "tzdata>=2025.1",
+  "PyYAML>=6,<7",
+  "packaging>=23",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<9"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "backend/app/dify_plugins/tests"]
 
 [tool.setuptools.packages.find]
 include = ["backend*"]
+
+[tool.setuptools.package-data]
+"backend.app.dify_plugins" = ["runner/Dockerfile", "runner/worker.py"]

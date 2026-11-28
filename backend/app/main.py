@@ -51,7 +51,66 @@ from backend.app.routes.memories import router as memories_router
 from backend.app.routes.sessions import router as sessions_router
 from backend.app.routes.workspaces import router as workspaces_router
 from backend.app.secrets import SecretStore, SystemSecretStore
+from backend.app.dify_plugins.docker import DockerRunner
+from backend.app.dify_plugins.manager import DifyPluginManager
+from backend.app.dify_plugins.marketplace import Marketplace
+from backend.app.dify_plugins.routes import router as dify_plugins_router
 from backend.app.settings import get_data_dir
+
+
+class _DifyUploadTooLarge(Exception):
+    pass
+
+
+class DifyUploadLimitMiddleware:
+    """Limit chunked Dify package uploads before multipart parsing consumes them."""
+
+    limit = 16 * 1024 * 1024 + 64 * 1024
+    path = "/api/dify-plugins/preview/file"
+
+    def __init__(self, app):
+        self.app = app
+
+    @staticmethod
+    async def _respond(send, status: int, message: str) -> None:
+        body = message.encode("utf-8")
+        await send({
+            "type": "http.response.start",
+            "status": status,
+            "headers": [(b"content-type", b"text/plain; charset=utf-8"), (b"content-length", str(len(body)).encode())],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or scope.get("path") != self.path:
+            await self.app(scope, receive, send)
+            return
+        headers = dict(scope.get("headers", []))
+        content_length = headers.get(b"content-length")
+        if content_length is not None:
+            try:
+                declared = int(content_length)
+            except (TypeError, ValueError):
+                await self._respond(send, 400, "请求长度无效。")
+                return
+            if declared > self.limit:
+                await self._respond(send, 413, "插件上传请求不能大于 16 MB。")
+                return
+        total = 0
+
+        async def limited_receive():
+            nonlocal total
+            message = await receive()
+            if message.get("type") == "http.request":
+                total += len(message.get("body", b""))
+                if total > self.limit:
+                    raise _DifyUploadTooLarge
+            return message
+
+        try:
+            await self.app(scope, limited_receive, send)
+        except _DifyUploadTooLarge:
+            await self._respond(send, 413, "插件上传请求不能大于 16 MB。")
 
 
 def create_app(
@@ -60,6 +119,8 @@ def create_app(
     http_transport: httpx.AsyncBaseTransport | None = None,
     secret_store: SecretStore | None = None,
     data_dir: str | Path | None = None,
+    dify_marketplace: Marketplace | None = None,
+    dify_runner: DockerRunner | None = None,
 ) -> FastAPI:
     resolved_data_dir = Path(data_dir).expanduser() if data_dir is not None else get_data_dir()
     resolved_database_path = (
@@ -84,6 +145,13 @@ def create_app(
         application.state.http_client = httpx.AsyncClient(
             transport=http_transport, timeout=httpx.Timeout(120.0)
         )
+        application.state.dify_marketplace = dify_marketplace or Marketplace(application.state.http_client)
+        application.state.dify_runner = dify_runner or DockerRunner()
+        application.state.dify_manager = DifyPluginManager(
+            resolved_data_dir / 'dify-plugins', application.state.tool_registry,
+            application.state.secret_store, application.state.dify_runner, application.state.dify_marketplace,
+        )
+        await application.state.dify_manager.restore()
         application.state.a2a_service = A2AService(resolved_database_path)
         application.state.agent_task_runner = AgentTaskRunner(application, application.state.a2a_service)
         application.state.a2a_service.runner = application.state.agent_task_runner
@@ -118,8 +186,8 @@ def create_app(
 
     @application.exception_handler(RequestValidationError)
     async def validation_error(request: Request, error: RequestValidationError):
-        if request.url.path == '/api/models' or request.url.path.startswith('/api/models/'):
-            # FastAPI's default validation response includes the rejected input.
+        if request.url.path == '/api/models' or request.url.path.startswith('/api/models/') or request.url.path.startswith('/api/dify-plugins/'):
+            # The default validation response includes rejected input; credentials must never be echoed.
             details = [{key: item[key] for key in ('loc', 'msg', 'type')} for item in error.errors()]
             return JSONResponse(status_code=422, content={'detail': details})
         return await request_validation_exception_handler(request, error)
@@ -162,17 +230,17 @@ def create_app(
     )
     application.state.pending_approvals = {}
     application.state.active_sessions = set()
+    application.add_middleware(DifyUploadLimitMiddleware)
 
     @application.middleware("http")
     async def protect_local_origin(request: Request, call_next):
         if request.url.path == "/api/data/import":
             content_length = request.headers.get("content-length")
-            if content_length:
-                try:
-                    if int(content_length) > 10 * 1024 * 1024:
-                        return PlainTextResponse("导入文件不能大于 10 MB。", status_code=413)
-                except ValueError:
-                    return PlainTextResponse("请求长度无效。", status_code=400)
+            try:
+                if content_length and int(content_length) > 10 * 1024 * 1024:
+                    return PlainTextResponse("导入文件不能大于 10 MB。", status_code=413)
+            except ValueError:
+                return PlainTextResponse("请求长度无效。", status_code=400)
         host = request.url.hostname or ""
         if host not in {"localhost", "127.0.0.1", "::1", "testserver"}:
             return PlainTextResponse("仅允许通过本机地址访问。", status_code=403)
@@ -208,6 +276,7 @@ def create_app(
     application.include_router(databases_router)
     application.include_router(scheduled_tasks_router)
     application.include_router(memories_router)
+    application.include_router(dify_plugins_router)
 
     frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
     assets_dir = frontend_dist / "assets"

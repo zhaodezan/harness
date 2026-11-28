@@ -26,11 +26,13 @@ def chat_options(connection, state, agent=None):
         row["id"]: row["name"] for row in connection.execute("SELECT id, name FROM mcp_servers WHERE enabled=1")
         if row["id"] in state.mcp_manager.servers
     }
+    selected_dify_tools = set(json.loads(agent['selected_local_tools_json'] or '[]')) if agent is not None else set()
     options = {key: [] for key in ChatCapabilities.model_fields}
     for tool in state.tool_registry.list():
         tool_id = tool.get("plugin_id") or ""
-        if tool_id in local_ids:
-            options["local_tools"].append({"id": tool_id, "name": tool["name"]})
+        if tool_id in local_ids or tool_id.startswith('dify:'):
+            if not tool_id.startswith('dify:') or agent is not None and tool_id in selected_dify_tools:
+                options["local_tools"].append({"id": tool_id, "name": tool["name"]})
         elif tool_id.startswith("mcp:"):
             parts = tool_id.split(":", 2)
             if len(parts) == 3 and parts[1] in mcp_names:
